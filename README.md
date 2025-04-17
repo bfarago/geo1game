@@ -1,6 +1,10 @@
 # geo1game
 This will be a space-civilization type of game.
 
+## Documentation
+
+For a technical overview of the map generation system, including structure and module responsibilities, see the [Map Generator Overview](doc/overview.md).
+
 ## Version 1.1
 Server side implementation rewritten to native c for XenU VPS environment, where SIMD instruction are available. To prepare these steps, the scalar calculations are reorganized to be multiple operands for each phase.
 A preliminary compute kernel is implemented, where N oerands are prepared to compute. Even that points which are not yet massively paralelized, shaped in this form to be ready to implement that way.

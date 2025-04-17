@@ -1,4 +1,35 @@
 #!/usr/bin/env python
+"""
+File:       run.py
+Author:     Barna Farago MYND-ideal ltd.
+Created:    2025-04-10
+
+Description:
+    Entry-point script for generating a full terrain map using libmapgen.
+    Coordinates the initialization, memory allocation, and data export pipeline.
+
+    Key features:
+        - Triggers C-based procedural generation via libmapgen.py
+        - Exports binary map file with terrain attributes
+        - Outputs metadata and diagnostics for generated map
+
+Usage:
+    $ python3 run.py
+    - Generates binary map file (default: 'mapdata.bin')
+    - Generates SQLite database with map data
+    - Generates regions with random names and attributes
+    - Generates PNG images for biome, elevation, and cloud cover
+    - Prints output size, resolution, and sample values to stdout
+
+Dependencies:
+    - Python 2.7+
+    - libmapgen.py wrapper
+    - libmapgen_c.so (compiled shared library)
+
+Notes:
+    - Make sure libmapgen_c.so is compiled and in the same directory or library path
+    - Output map is a contiguous array of MapPoint structs (packed binary format)
+"""
 import libmapgen
 from PIL import Image
 import os
@@ -10,13 +41,14 @@ start_time = time.time()
 # database path
 db_path = "../var/mapdata.sqlite"
 # Output directory for images
-output_dir = "../www"
+output_dir = "../www/m"
 
 print "GEO New world generation started."
 # Initialize the map generator module
-libmapgen.init()
-#libmapgen.generate()
-#libmapgen.flush()
+libmapgen.clean()  # removes old mapdata bin and sqlite files
+libmapgen.init()   # try to load bin files, or create new one 
+libmapgen.generate()    # generate map data
+libmapgen.flush()   # flush map data to disk
 print("Elapsed time: %.3f seconds" % (time.time() - start_time))
 
 # Image resolution based on map step
@@ -160,7 +192,7 @@ except Exception as e:
     print "Error during insert:", e
 
 # Clean up the module
-libmapgen.cleanup()
+libmapgen.finish()
 conn.close()
 
 end_time = time.time()

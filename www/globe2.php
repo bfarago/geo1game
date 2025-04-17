@@ -67,9 +67,9 @@
     let isLandscapeMode = false;
     let starTheta = 0;
     let cloudRotationSpeed = 0.001;
-    let file_biome = 'biome.png';
-    let file_elevation = 'elevation.png';
-    let file_clouds = 'clouds.png';
+    let file_biome = 'm/biome.png';
+    let file_elevation = 'm/elevation.png';
+    let file_clouds = 'm/clouds.png';
     let selLat, selLon, selAlt;
 
     const inclination = THREE.MathUtils.degToRad(23.4);

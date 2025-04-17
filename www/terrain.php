@@ -63,8 +63,8 @@
     scene.add(new THREE.AmbientLight(0x404040));
 
     const loader = new THREE.TextureLoader();
-    const biomeTexture = loader.load('biome.png');
-    const elevationTexture = loader.load('elevation.png');
+    const biomeTexture = loader.load('m/biome.png');
+    const elevationTexture = loader.load('m/elevation.png');
 
     const geometry = new THREE.PlaneGeometry(10, 10, 1024, 1024);
     const material = new THREE.MeshStandardMaterial({
