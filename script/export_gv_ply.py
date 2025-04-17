@@ -1,17 +1,5 @@
-#!/usr/bin/env python
-"""Exports the globe surface, only the vectors.
-"""
 import sqlite3
 import math
-
-__author__ = "Barna Farago"
-__copyright__ = "Copyright 2025, MYND-ideal ltd."
-__credits__ = ["Barna Faragot"]
-__license__ = "GPL"
-__version__ = "1.0.1"
-__maintainer__ = "Barna Farago"
-__email__ = "bfarago@gmail.com"
-__status__ = "Development"
 
 db_path = "../var/mapdata.sqlite"
 ply_file = "../www/planetvectors_export.ply"

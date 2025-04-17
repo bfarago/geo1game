@@ -1,19 +1,5 @@
-#!/usr/bin/env python
-"""Exports the globe surface into ply file with colors.
-XCode can open it without a problem. Blender can also open, but you have to create a 
-color node, and connect to the mesh (usual thing).
-"""
 import sqlite3
 import math
-
-__author__ = "Barna Farago"
-__copyright__ = "Copyright 2025, MYND-ideal ltd."
-__credits__ = ["Barna Faragot"]
-__license__ = "GPL"
-__version__ = "1.0.1"
-__maintainer__ = "Barna Farago"
-__email__ = "bfarago@gmail.com"
-__status__ = "Development"
 
 db_path = "../var/mapdata.sqlite"
 ply_file = "../www/planet_export.ply"

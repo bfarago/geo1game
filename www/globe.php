@@ -46,7 +46,7 @@
     const ambient = new THREE.AmbientLight(0x334488, 0.4);
     scene.add(ambient);
 
-    const geometry = new THREE.SphereGeometry(1, 512, 512);
+    const geometry = new THREE.SphereGeometry(1, 1024, 1024);
     const colors = new Float32Array(geometry.attributes.position.count * 3);
     geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
     const material = new THREE.MeshPhongMaterial({ vertexColors: true });
@@ -155,7 +155,7 @@ function loadRegion(bounds) {
         const key = `${latDeg.toFixed(2)},${lonDeg.toFixed(2)}`;
         const cell = data[key];
         if (cell) {
-          const scale = 1.0 + (cell.e || 0) * 0.02;
+          const scale = 1.0 + (cell.e || 0) * 0.01;
           vertex.multiplyScalar(scale);
           pos.setXYZ(i, vertex.x, vertex.y, vertex.z);
 	  //const regn= regions[key];
@@ -167,9 +167,9 @@ function loadRegion(bounds) {
 	  */
 	  const isRed = false;
 	  if (!isRed) {
-            col.setX(i, cell.r);
-            col.setY(i, cell.g);
-            col.setZ(i, cell.b);
+            col.setX(i, cell.r/255.0);
+            col.setY(i, cell.g/255.0);
+            col.setZ(i, cell.b/255.0);
 	  }
         }
       }

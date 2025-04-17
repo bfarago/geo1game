@@ -1,6 +1,12 @@
 # geo1game
 This will be a space-civilization type of game.
 
+## Version 1.1
+Server side implementation rewritten to native c for XenU VPS environment, where SIMD instruction are available. To prepare these steps, the scalar calculations are reorganized to be multiple operands for each phase.
+A preliminary compute kernel is implemented, where N oerands are prepared to compute. Even that points which are not yet massively paralelized, shaped in this form to be ready to implement that way.
+All of these works was done less in a weeek.
+
+## Version 1.0
 At the time of 2025 Q1, this is the very first version of the project. It was done just in one day (or less).
 
 ## Actually implemented:

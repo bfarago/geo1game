@@ -1,22 +1,7 @@
-#!/usr/bin/env python
-"""Generator script for region objects into the SQL.
-regions table row contains one cell of a region, which could
-actually shown on the map, at night it could glow, at day it is a city like
-object.
-Later it could have resources, economy agents, etc.
-"""
+# -*- coding: utf-8 -*-
 import sqlite3
 import os
 import random
-
-__author__ = "Barna Farago"
-__copyright__ = "Copyright 2025, MYND-ideal ltd."
-__credits__ = ["Barna Faragot"]
-__license__ = "GPL"
-__version__ = "1.0.1"
-__maintainer__ = "Barna Farago"
-__email__ = "bfarago@gmail.com"
-__status__ = "Development"
 
 db_path = "../var/mapdata.sqlite"
 
