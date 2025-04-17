@@ -92,6 +92,7 @@ typedef struct {
     float *noise1;
     WorkFbmOnSphereN wrkNoise2;
     float *noise2;
+    float *noise3;
 } WorkBiomColor;
 
 /** Global variable for the map data */
@@ -144,7 +145,7 @@ void mapgen_clean(void) {
         if (remove(MAPGEN_FILENAME) == 0) {
             g_map.filestatus = MAPGEN_OK;
             g_map.need_update = 0;
-            fprintf(stderr, "OK, There preview map file has been deleted: %s\n", MAPGEN_FILENAME);
+            fprintf(stderr, "OK, The previous map file has been deleted: %s\n", MAPGEN_FILENAME);
         } else {
             fprintf(stderr, "Failed to delete file %s: %s\n", MAPGEN_FILENAME, strerror(errno));
         }
@@ -485,6 +486,7 @@ void WorkBiomColor_init(WorkBiomColor* wrk, int count) {
     wrk->noise2 = (float*)malloc(sizeof(float) * count);
     WorkFbmOnSphereN_init(&wrk->wrkNoise1, count);
     WorkFbmOnSphereN_init(&wrk->wrkNoise2, count);
+    wrk->noise3 = (float*)malloc(sizeof(float) * count);
 }
 
 /** Biom Color assignment kernel cleanup */
@@ -501,8 +503,94 @@ void WorkBiomColor_free(WorkBiomColor* wrk) {
     WorkFbmOnSphereN_free(&wrk->wrkNoise2);
     free(wrk->noise1);
     free(wrk->noise2);
+    free(wrk->noise3);
     wrk->count = 0;
 }
+
+#define MAPGEN_LON_POINTS LON_POINTS
+float north_cutoff[MAPGEN_LON_POINTS];
+float south_cutoff[MAPGEN_LON_POINTS];
+
+#if (0)
+//Furier's algorithm, very bad looking
+typedef struct {
+    float amplitude;
+    float period;
+    float offset;
+} PolarCutoffParams;
+
+#define MAPGEN_POLAR_CUTOFFS 8
+PolarCutoffParams g_pcp_north[MAPGEN_POLAR_CUTOFFS];
+PolarCutoffParams g_pcp_south[MAPGEN_POLAR_CUTOFFS];
+
+void mapgen_init_polar_cutoffs(void) {
+    for (int i=0; i< MAPGEN_POLAR_CUTOFFS; i++) {
+        float falloff = 1.0f / (float)(1 + i);
+        g_pcp_north[i].amplitude = ((float)rand() / RAND_MAX) * falloff;
+        g_pcp_north[i].period  = 1 << i;
+        g_pcp_north[i].offset =  rand() % 314 / 100.0f;
+        g_pcp_south[i].amplitude = ((float)rand() / RAND_MAX) * falloff;
+        g_pcp_south[i].period  = 1 << i;
+        g_pcp_south[i].offset =  rand() % 314 / 100.0f;
+    }
+    for (int i = 0; i < MAPGEN_LON_POINTS; i++) {
+        float lon_ratio = (float)i / (MAPGEN_LON_POINTS - 1); // 0..1
+        float angle = lon_ratio * 2.0f * 3.14159265f;
+        float noise = 0.0f;
+        if (i>400; i<MAPGEN_LON_POINTS; i++) {
+            noise=
+
+        float noise = 0.0f;
+        for (int j = 0; j<MAPGEN_POLAR_CUTOFFS; j++) {
+            noise += g_pcp_north[j].amplitude * sinf(angle * g_pcp_north[j].period + g_pcp_north[j].offset);
+        }
+        float offset = noise * 2.0f;
+        north_cutoff[i] = 80.0f + offset;
+        noise = 0.0f;
+        for (int j = 0; j<MAPGEN_POLAR_CUTOFFS; j++) {
+            noise += g_pcp_south[j].amplitude * sinf(angle * g_pcp_south[j].period + g_pcp_south[j].offset);
+        }
+        offset = noise * 2.0f;
+        south_cutoff[i] = 79.0f + offset;
+    }
+}
+#else
+//Midpoint displacement fractal
+
+/* In case of simd needed, it would be a good idea to chunk multiple layers, similarly like the
+* loop unrolling technique, but shoud be taking consideration, the implemented calculation will be
+* summa 2^(k-1) times, where k is the number of layers.
+*/
+float midpoint_max= 88.0f;
+float midpoint_min= 70.0f;
+
+void midpoint_displace(float *cutoff, int start, int end, float amplitude) {
+    if (end - start <= 1) return;
+
+    int mid = (start + end) / 2;
+    float delta = ((float)rand() / RAND_MAX * 2.0f - 1.0f) * amplitude;
+    float base = (cutoff[start] + cutoff[end]) / 2.0f;
+    float candidate= base + delta;
+    if ((candidate > midpoint_max) || ( candidate < midpoint_min)) {
+        candidate = base - delta; // rebounce
+    }
+    cutoff[mid] = candidate;
+    midpoint_displace(cutoff, start, mid, amplitude * 0.5f);
+    midpoint_displace(cutoff, mid, end, amplitude * 0.5f);
+}
+void mapgen_init_a_polar_cutoff(float *cutoff, float base, float amplitude) {
+    cutoff[0] = base;
+    cutoff[MAPGEN_LON_POINTS - 1] = base;
+    midpoint_displace(cutoff, 0, MAPGEN_LON_POINTS - 1, amplitude);
+    // optional smoothing pass?
+}
+void mapgen_init_polar_cutoffs(void) {
+    // Amplitude shall be less than the max-min range, due to the rebounce algorithm.
+    mapgen_init_a_polar_cutoff(north_cutoff, 80.0f, 14.0f);
+    mapgen_init_a_polar_cutoff(south_cutoff, 79.0f, 8.0f);
+}
+#endif
+
 /** Compute the biome color for a given latitude band
  * This function computes the biome color for a given latitude band
  * using the provided elevation data and noise functions.
@@ -568,12 +656,34 @@ void WorkBiomColor_compute(
         wrk->cold_au8[i] = 0;
     }
     // poles, cold climate
+    /*
+    //this version was too slow, so I removed it. The next block uses a lookup table.
     if (pLatData->abslat > 70.0f) {
-        perlin_variation_n(pLatData->lat, lon_a, wrk->noise1, count);
+        //printf("lat: %f\n", pLatData->abslat);
+        perlin_variation_n(pLatData->lat, lon_a, wrk->noise3, count);
         for (int i = 0; i < count; i++) {
-            if (wrk->noise1[i] < (pLatData->abslat - 77.0f)) {
+            float noise = wrk->noise3[i] * 5.0f;
+            float threshold = 0.0f; //pLatData->abslat - 77.0f;
+            if (noise < threshold) {
                 wrk->cold_au8[i] = 1U;
-            }   
+            }
+            //printf("lon: %f, cold:%i, noise: %f threshold:%f, diff:%f\n",lon_a[i], wrk->cold_au8[i], noise, threshold, noise - threshold);
+        }
+    }*/
+    if (pLatData->abslat > 70.0f) {
+        int lon_index = (int)((lon_a[0] + 180.0f) / 360.0f * MAPGEN_LON_POINTS) % MAPGEN_LON_POINTS;
+        if (lat>0.0){  
+            for(int i = 0; i < count; i++) { 
+                if (pLatData->abslat > north_cutoff[lon_index++]) {
+                    wrk->cold_au8[i] = 1U;
+                }
+            }
+        }else{
+            for(int i = 0; i < count; i++) { 
+                if (pLatData->abslat > south_cutoff[lon_index++]) {
+                    wrk->cold_au8[i] = 1U;
+                }
+            }
         }
     }
     // set color
@@ -606,6 +716,8 @@ void WorkBiomColor_compute(
 void mapgen_generate(void) {
     int i, j;
     float buf_lat[BLOCK_SIZE], buf_lon[BLOCK_SIZE], buf_noise[BLOCK_SIZE];
+    mapgen_init_polar_cutoffs();
+
     WorkFbmOnSphereN wrk;
     WorkFbmOnSphereN_init(&wrk, BLOCK_SIZE);
     WorkBiomColor wrk_biomcolor;

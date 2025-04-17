@@ -15,7 +15,7 @@
 #define PERLIN3D_H
 
 /** Number of points in a block used in computational kernels. */
-#define BLOCK_SIZE (180)
+#define BLOCK_SIZE (1800)
 
 /** Point structure.
  * This structure represents a point in 3D space with x, y, z coordinates and an additional value 'a'.
