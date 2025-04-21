@@ -22,7 +22,7 @@
     let starTheta = 0;
     const inclination = THREE.MathUtils.degToRad(23.4);
     let atmosphere = null;
-
+    const urlMapdata = '/geoapi/map';
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
     const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('globe'), antialias: true });
@@ -64,7 +64,7 @@
     let preloadSpeed = 100;
     function loadAllRegions()
     {
-        const url = `regions_chunk.php`;
+        const url = '/geoapi/regions_chunk'; //`regions_chunk.php`;
         fetch(url)
           .then(res => res.json())
           .then(data => {
@@ -81,7 +81,7 @@
       const key = `${lat_min},${lon_min}`;
 
       if (!loadedChunks.has(key)) {
-        const url = `mapdata.php?lat_min=${lat_min}&lat_max=${lat_max}&lon_min=${lon_min}&lon_max=${lon_max}`;
+        const url = `${urlMapdata}?lat_min=${lat_min}&lat_max=${lat_max}&lon_min=${lon_min}&lon_max=${lon_max}`;
         fetch(url)
           .then(res => res.json())
           .then(data => {
@@ -135,8 +135,8 @@ function loadRegion(bounds) {
       const key = `${bounds.lat_min},${bounds.lon_min}`;
       if (loadedChunks.has(key)) return;
       loadedChunks.add(key);
-
-      const url = `mapdata.php?lat_min=${bounds.lat_min}&lat_max=${bounds.lat_max}` +
+      //mapdata.php?
+      const url = `${urlMapdata}?lat_min=${bounds.lat_min}&lat_max=${bounds.lat_max}` +
                   `&lon_min=${bounds.lon_min}&lon_max=${bounds.lon_max}`;
       fetch(url)
         .then(res => res.json())

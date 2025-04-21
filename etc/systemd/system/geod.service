@@ -1,0 +1,18 @@
+[Unit]
+Description=GeoD Terrain Server
+After=network.target
+
+[Service]
+User=brown
+Group=brown
+WorkingDirectory=/home/brown/src/geo/bin
+ExecStart=/home/brown/src/geo/bin/geod
+ExecReload=/bin/kill -USR1 $MAINPID
+Restart=always
+RestartSec=3
+StandardOutput=append:/var/log/geod/output.log
+StandardError=append:/var/log/geod/error.log
+PIDFile=/home/brown/src/geo/var/geod.pid
+
+[Install]
+WantedBy=multi-user.target

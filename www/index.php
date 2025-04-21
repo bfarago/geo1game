@@ -27,6 +27,10 @@
   </td></TR><TR><TD align=center>
   <h2>Terrain view</h2>
   <a href="terrain.php"><img src=i/landscape.png width=240 height=200 /></a>
+  </td></TR><TR><TD align=center bgcolor=#222>
+  <h2>Native C web service</h2>
+  <small>This is a test page for webservice, if it is running. :) </small><br>
+  <a href="http://myndideal.com/geoapi/"><img src=i/globe1.png width=120 height=110 /></a><br>
 </TD></TR></TABLE>
 </DIV
 </body>

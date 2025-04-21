@@ -1,0 +1,70 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          geod
+# Required-Start:    $network
+# Required-Stop:
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: GeoD terrain server
+### END INIT INFO
+GEOD_DIR="/home/brown/src/geo"
+GEOD_BINDIR=${GEOD_DIR}/bin
+GEOD_BIN="$GEOD_BINDIR/geod"
+GEOD_PID="$GEOD_DIR/var/geod.pid"
+GEOD_USER="brown"
+
+start() {
+    echo "Starting geod..."
+    if [ -f "$GEOD_PID" ]; then
+        echo "Already running?"
+        return
+    fi
+    start-stop-daemon --start \
+    --chdir "$GEOD_BINDIR" \
+    --chuid "$GEOD_USER" \
+    --background \
+    --exec "$GEOD_BIN"
+}
+
+stop() {
+    echo "Stopping geod..."
+    if [ -f "$GEOD_PID" ]; then
+        start-stop-daemon --stop --pidfile "$GEOD_PID" --retry=TERM/10/KILL/5
+    else
+        echo "geod not running"
+    fi
+}
+
+restart() {
+    stop
+    sleep 1
+    start
+}
+
+reload() {
+    if [ -f "$GEOD_PID" ]; then
+        echo "Reloading geod..."
+        kill -USR1 $(cat "$GEOD_PID")
+    else
+        echo "geod not running"
+    fi
+}
+
+status() {
+    if [ -f "$GEOD_PID" ] && kill -0 $(cat "$GEOD_PID") 2>/dev/null; then
+        echo "geod is running"
+        return 0
+    else
+        echo "geod is not running"
+        return 1
+    fi
+}
+
+case "$1" in
+    start) start ;;
+    stop) stop ;;
+    restart) restart ;;
+    reload) reload ;;
+    status) status ;;
+    *) echo "Usage: $0 {start|stop|restart|reload|status}"; exit 1 ;;
+esac

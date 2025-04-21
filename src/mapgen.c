@@ -100,9 +100,10 @@ Map  g_map;
 
 /** Calculates map index from latitude and longitude */
 static inline unsigned long mapgen_get_index(float lat, float lon) {
-    return (lon + 180.0f) * MAPGEN_MULTIPLIER + (lat + 90.0f) * MAPGEN_MULTIPLIER * LON_POINTS;
+    int x = (int)((lon + 180.0f) * MAPGEN_MULTIPLIER);
+    int y = (int)((lat + 90.0f) * MAPGEN_MULTIPLIER);
+    return y * LON_POINTS + x;
 }
-
 /** Initializes the mapgen module
  * This function initializes the mapgen module, allocating memory for the map data and loading existing data if available.
  * Returns MAPGEN_OK on success, or an error code on failure.
@@ -225,6 +226,9 @@ mapgen_ret mapgen_set_point(float lat, float lon, float elevation, unsigned char
  */
 TerrainInfo mapgen_get_terrain_info(float lat, float lon) {
     TerrainInfo terrain_info;
+    if (g_map.mapdata == NULL) {
+        mapgen_init();
+    }
     unsigned long index = mapgen_get_index(lat, lon);
     if ((g_map.mapdata == NULL) ||(index >= g_map.mapsize)) {
         terrain_info.elevation = 0;
@@ -724,6 +728,8 @@ void mapgen_generate(void) {
     WorkBiomColor_init(&wrk_biomcolor, BLOCK_SIZE);
 
     MapPoint* pdata=g_map.mapdata;
+    unsigned char precip_min = 255;
+    unsigned char precip_max = 0;
     for (i = 0; i < LAT_POINTS; i++) {
         double lat = -90.0f + (double)i * MAPGEN_RESOLUTION;
         LatData latdata;
@@ -750,7 +756,18 @@ void mapgen_generate(void) {
                 &wrk_biomcolor,
                 &latdata, buf_lon, buf_noise, pdata, count
             );
+            for(int k = 0; k < count; k++) {
+                unsigned char precip = pdata[k].precip;
+                if (precip < precip_min) precip_min = precip;
+                if (precip > precip_max) precip_max = precip;
+            }
             pdata += count;
+        }
+    }
+    for(i = 0; i < g_map.mapsize; i++) {
+        MapPoint *point = &g_map.mapdata[i];
+        if (point->precip > 0) {
+            point->precip = (unsigned char)((point->precip-precip_min) * 255 / precip_max);
         }
     }
     g_map.need_update = 1; // the map data has been modified
