@@ -122,6 +122,8 @@ int geod_mutex_timedlock(pthread_mutex_t *lock, const unsigned long timeout_ms) 
     return res;
 }
 
+pthread_mutex_t plugin_housekeeper_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 #if PNG_LIBPNG_VER >= 10600
     // libpng 1.6.40 and later
     #define HAVE_OLD_PNG 0
@@ -316,15 +318,23 @@ int plugin_start(int id) {
             return -1;
         }
     }
-    pc->last_used = time(NULL);
-    pc->used_count++;
+    int res = geod_mutex_timedlock(&plugin_housekeeper_mutex, 20000UL);
+    if (res == 0) {
+        pc->last_used = time(NULL);
+        pc->used_count++;
+        pthread_mutex_unlock(&plugin_housekeeper_mutex);
+    }
     return 0;
 }
 void plugin_stop(int id) {
     PluginContext *pc = &g_Plugins[id];
     if (pc->handle) {
-        pc->last_used = time(NULL);
-        pc->used_count--;
+        int res = geod_mutex_timedlock(&plugin_housekeeper_mutex, 20000UL);
+        if (res == 0) {
+            pc->last_used = time(NULL);
+            pc->used_count--;
+            pthread_mutex_unlock(&plugin_housekeeper_mutex);
+        }
     }
 }
 
@@ -404,7 +414,7 @@ void housekeeper_plugins(time_t now ){
         if (pc->handle) {
             if (pc->used_count <= 0) {
                 time_t last = (time_t)pc->last_used;
-                if (last + 60 < now) {
+                if (difftime(now, last) > PLUGIN_IDLE_TIMEOUT) {
                     plugin_unload(i);
                     logmsg("Plugin unloaded: %s", pc->name);
                 }
@@ -1021,9 +1031,9 @@ void *handle_client(void *arg) {
         if (pc->http_route_count == 0) continue;
         for (int j=0; j<pc->http_route_count; j++) {
             if (strcmp(pc->http_routes[j], params.path) == 0) {
-                if (!plugin_start(j)){
+                if (!plugin_start(i)){
                     pc->http.request_handler(pc, ctx, &params);
-                    plugin_stop(j);
+                    plugin_stop(i);
                     close(ctx->socket_fd);
                     free(ctx);
                     return NULL;

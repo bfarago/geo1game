@@ -14,7 +14,8 @@
 
         const scene = new THREE.Scene();
         const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
-        camera.position.z = 5;
+        camera.position.set(2, 2, 5); // Kamera pozíciója
+        camera.lookAt(new THREE.Vector3(0, 0, 0)); // Nézzen az origóra
 
         const renderer = new THREE.WebGLRenderer({ antialias: true });
         renderer.setSize(window.innerWidth, window.innerHeight);

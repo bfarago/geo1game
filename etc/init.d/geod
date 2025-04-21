@@ -1,4 +1,5 @@
 #!/bin/sh
+PATH=/sbin:/bin:/usr/sbin:/usr/bin
 ### BEGIN INIT INFO
 # Provides:          geod
 # Required-Start:    $network

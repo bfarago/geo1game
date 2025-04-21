@@ -17,5 +17,8 @@
 #define MAX_QUERY_VARS 32
 #define MAX_HEADER_LINES 32
 #define MAX_PATH 256
-
+#define MAX_PLUGIN 10
+#define MAX_PLUGIN_NAME 64
+#define MAX_PLUGIN_PATH 512
+#define PLUGIN_IDLE_TIMEOUT (20)
 #endif // GLOBAL_H

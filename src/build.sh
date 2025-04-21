@@ -17,4 +17,4 @@ gcc -Wall -Wextra -g -std=c99 -O0 -march=native -ffast-math -funroll-loops -mfma
 mv shape.so ../plugins/shape.so
 
 
-cp geod ../bin/geod
+mv geod ../bin/geod
