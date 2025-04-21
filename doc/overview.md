@@ -1,3 +1,50 @@
+# Overview of the GEO daemon
+
+## Purpose
+This document provides a technical overview of the main components in the GEO daemon, their responsibilities, and how they interact.
+
+## Components
+### 1. `geod.c`
+**Role:** Main GEO daemon  
+**Responsibilities:**
+- Initializes the GEO daemon and starts core services  
+- Handles Linux signals (`SIGINT`, `SIGTERM`, etc.) for clean start/stop behavior  
+- Manages the main loop and event handling (e.g., timers, housekeeper thread)  
+- Implements an HTTP server to handle requests  
+- Dynamically loads/unloads plugins (http request handlers)
+- Dynamically loads/unloads the Map Generator module (`libmapgen_c.so`)  
+- Supports fast, on-demand map regeneration  
+- Generates textures for globe visualization:
+  - biome (color)
+  - elevation (terrain)
+  - precipitation (clouds/alpha)  
+- Caches generated textures based on file modification time and cache TTL  
+- Manages "regions" (e.g., cities) with geographic coordinates and attributes  
+- Randomly generates city names from predefined name patterns or lists  
+### 2. `plugin.h`
+**Role:** Plugin system  
+**Responsibilities:**
+- Registers plugins
+- Loads plugins
+- Manages plugin lifecycle
+- Provides a plugin interface for the GEO daemon
+### 3. `plugin_shape/plan.c`
+**Role:** Plan generation for shape synthesis.
+**Responsibilities:**
+- Generates plans
+### 4. `plugin_shape/shape.c`
+**Role:** Shape synthesis and rendering.
+**Responsibilities:**
+- Generates shapes
+- Probably it will generated 2D render later.
+- json output ready data structure
+### 5. `plugin_shape/plugin_shape.c`
+**Role:** Plugin for shape synthesis and rendering.
+**Responsibilities:**
+- Manages shape synthesis and rendering
+- Provides a plugin interface for the GEO daemon
+- json export of the generated data.
+
 # Map Generation Module – Overview
 
 ## Purpose
