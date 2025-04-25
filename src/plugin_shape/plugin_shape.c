@@ -13,10 +13,11 @@
 #include "plan.h"
 
 #define logmsg(...) g_host->logmsg(__VA_ARGS__)
-#define send_response(...) g_host->send_response(__VA_ARGS__)
-#define send_file(...) g_host->send_file(__VA_ARGS__)
+#define send_response(...) g_host->http.send_response(__VA_ARGS__)
+#define send_file(...) g_host->http.send_file(__VA_ARGS__)
 #define file_exists_recent(...) g_host->file_exists_recent(__VA_ARGS__)
 
+char g_cache_dir[MAX_PATH];
 const PluginHostInterface *g_host;
 void handle_shipmodel(ClientContext *ctx, RequestParams *params);
 
@@ -27,7 +28,7 @@ const HttpRouteRule http_routes[] = {
 
 void handle_shipmodel(ClientContext *ctx, RequestParams *params) {
     char filename[128];
-    snprintf(filename, sizeof(filename), "../var/shipmodel_%d.json", params->id);
+    snprintf(filename, sizeof(filename), "%s/shipmodel_%d.json",g_cache_dir, params->id);
     if (0 == g_host){
         return;
     }
@@ -133,13 +134,14 @@ int plugin_http_get_routes_count = 1;
 
 int plugin_register(PluginContext *pc, const PluginHostInterface *host) {
     g_host = host;
-    host->register_http_route((void*)pc, plugin_http_get_routes_count, plugin_http_get_routes);
+    host->http.register_http_route((void*)pc, plugin_http_get_routes_count, plugin_http_get_routes);
     return PLUGIN_SUCCESS;
 }
 
 int plugin_init(PluginContext* pc, const PluginHostInterface *host) {
     // Initialization code here
     g_host = host;
+    g_host->config_get_string("CACHE", "dir", g_cache_dir, MAX_PATH, CACHE_DIR);
     pc->http.request_handler = (void*) handle_shape;
     return PLUGIN_SUCCESS;
 }

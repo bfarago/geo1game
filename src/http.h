@@ -7,8 +7,9 @@
 
 typedef struct {
     float lat_min, lat_max, lon_min, lon_max;
-    float step;
-    int width, height, id;
+    float alt;
+    float step,radius;
+    int width, height, id, terrain;
     char path[MAX_HTTP_KEY_LEN];
 } RequestParams;
 
@@ -43,5 +44,15 @@ typedef struct {
     char path[MAX_HTTP_KEY_LEN];
     RequestHandler handler;
 } HttpRouteRule;
+
+extern void send_response(int client, int status_code, const char *content_type, const char *body);
+void send_file(int client, const char *content_type, const char *path);
+void send_chunk_head(ClientContext *ctx, int status_code, const char *content_type);
+void send_chunks(ClientContext *ctx, char* buf, int offset);
+void send_chunk_end(ClientContext *ctx);
+
+// Internal
+void http_parse_request(ClientContext *ctx, HttpRequest *req);
+void parse_request_path_and_params(const char *request, RequestParams *params);
 
 #endif // HTTP_H

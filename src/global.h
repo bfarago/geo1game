@@ -10,6 +10,7 @@
 #define GEOD_LOGFILE "../var/geod.log"
 #define REGIONS_FILE "../var/regions.bin"
 #define PLUGIN_DIR "../plugins"
+#define CACHE_DIR "../var/cache"
 
 #define BUF_SIZE 8192
 #define CACHE_TIME 3600 
@@ -20,5 +21,7 @@
 #define MAX_PLUGIN 10
 #define MAX_PLUGIN_NAME 64
 #define MAX_PLUGIN_PATH 512
-#define PLUGIN_IDLE_TIMEOUT (20)
+#define PLUGIN_IDLE_TIMEOUT (60)
+#define MAPGEN_IDLE_TIMEOUT (60)
+
 #endif // GLOBAL_H

@@ -23,20 +23,62 @@
 #include <ctype.h>
 #include <math.h>
 #include "global.h"
-#include "http.h"
 #include "plugin.h"
+#include "http.h"
+#include "config.h"
 
+
+typedef struct {
+    int interval;
+} plugin_timer_t;
+
+int file_exists(const char *path);
+int file_exists_recent(const char *path, int interval);
 void register_http_routes(PluginContext *ctx, int count, const char *routes[]);
 
+void test_image(ClientContext *ctx, RequestParams *params);
+void handle_status_json(ClientContext *ctx, RequestParams *params);
+void handle_status_html(ClientContext *ctx, RequestParams *params);
+void infopage(ClientContext *ctx, RequestParams *params);
+
+int http_routes_count = 8;
+const HttpRouteRule http_routes[] = {
+    {"/test", test_image},
+    {"/status.html", handle_status_html},
+    {"/status.json", handle_status_json},
+    {"/", infopage},
+};
+
+
+/** unix signal handlers and process id save */
 volatile sig_atomic_t keep_running = 1;
 volatile sig_atomic_t reload_plugins = 0;
+
+MapContext map_context;
+
+pthread_mutex_t plugin_housekeeper_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+typedef struct {
+    pthread_t thread_id;
+    unsigned char running;
+    unsigned char mapgen_loaded;
+    time_t last_mapgen_use;
+} housekeeper_t;
+
+housekeeper_t g_housekeeper;
+
+int g_PluginCount = 0;
+PluginContext g_Plugins[MAX_PLUGIN];
+char g_cache_dir[MAX_PATH];
+int g_http_port;
+int g_debug_msg_enabled=0;
 
 void sigusr1_handler(int signum) {
     (void)signum;
     reload_plugins = 1;
 }
 void sigint_handler(int signum) {
-    (void)signum; // suppress unused parameter warning
+    (void)signum;
     keep_running = 0;
 }
 void sigterm_handler(int signum) {
@@ -65,11 +107,11 @@ void write_pidfile_or_exit() {
     fprintf(fp, "%d\n", getpid());
     fclose(fp);
 }
-
 void remove_pidfile() {
     unlink(GEOD_PIDFILE);
 }
 
+/** Log a message to the log file. */
 void logmsg(const char *fmt, ...) {
     FILE *log = fopen(GEOD_LOGFILE, "a");
     if (!log) return;
@@ -85,24 +127,39 @@ void logmsg(const char *fmt, ...) {
     fprintf(log, "\n");
     fclose(log);
 }
+void errormsg(const char *fmt, ...) {
+    FILE *log = fopen(GEOD_LOGFILE, "a");
+    if (!log) return;
+    time_t now = time(NULL);
+    struct tm *t = localtime(&now);
+    fprintf(log, "%04d-%02d-%02d %02d:%02d:%02d ERROR: ",
+            t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
+            t->tm_hour, t->tm_min, t->tm_sec);
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(log, fmt, args);
+    va_end(args);
+    fprintf(log, "\n");
+    fclose(log);
+}
 
-typedef struct {
-    float elevation;
-    unsigned char r, g, b;
-    unsigned char precip, temp;
-} TerrainInfo;
-
-typedef TerrainInfo (*get_terrain_info_t)(float, float);
-
-typedef void (*mapgen_finish_t)(void);
-typedef int (*mapgen_init_t)(void);
-typedef struct{
-    void *lib_handle;
-    get_terrain_info_t get_info;
-    mapgen_finish_t mapgen_finish;
-    mapgen_init_t mapgen_init;
-} MapContext;
-MapContext map_context;
+void debugmsg(const char *fmt, ...) {
+    if (g_debug_msg_enabled){
+        FILE *log = fopen(GEOD_LOGFILE, "a");
+        if (!log) return;
+        time_t now = time(NULL);
+        struct tm *t = localtime(&now);
+        fprintf(log, "%04d-%02d-%02d %02d:%02d:%02d DEBUG: ",
+                t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
+                t->tm_hour, t->tm_min, t->tm_sec);
+        va_list args;
+        va_start(args, fmt);
+        vfprintf(log, fmt, args);
+        va_end(args);
+        fprintf(log, "\n");
+        fclose(log);
+    }
+}
 
 int geod_mutex_timedlock(pthread_mutex_t *lock, const unsigned long timeout_ms) {
     struct timespec ts;
@@ -115,71 +172,41 @@ int geod_mutex_timedlock(pthread_mutex_t *lock, const unsigned long timeout_ms) 
     }
     int res= pthread_mutex_timedlock(lock, &ts);
     if (res == ETIMEDOUT) {
-        logmsg("Mutex lock timed out");
+        errormsg("Mutex lock timed out");
     } else if (res != 0) {
-        logmsg("Mutex lock failed: %d", res);
+        errormsg("Mutex lock failed: %d", res);
     }   
     return res;
 }
 
-pthread_mutex_t plugin_housekeeper_mutex = PTHREAD_MUTEX_INITIALIZER;
-
-#if PNG_LIBPNG_VER >= 10600
-    // libpng 1.6.40 and later
-    #define HAVE_OLD_PNG 0
-    #define PNG_CRITICAL_START
-    #define PNG_CRITICAL_END
-#else
-    // libpng 1.4.0 and earlier
-    #define HAVE_OLD_PNG 1
-    // multithread safe before v1.4.0 see github issue
-    pthread_mutex_t png_mutex = PTHREAD_MUTEX_INITIALIZER;
-    #define PNG_CRITICAL_START() geod_mutex_timedlock(&png_mutex, 20000UL)
-    #define PNG_CRITICAL_END() pthread_mutex_unlock(&png_mutex)
-#endif
-
-typedef struct {
-    unsigned long width, height;
-    FILE *fp;
-    png_structp png_ptr;
-    png_infop info_ptr;
-    const char *filename;
-    char tmp_filename[128];
-} PngImage;
-
-#define MAPGEN_IDLE_TIMEOUT 60
-
-typedef struct {
-    pthread_t thread_id;
-    unsigned char running;
-    unsigned char mapgen_loaded, png_loaded, sqlite_loaded, mysql_loaded;
-    time_t last_mapgen_use;
-} housekeeper_t;
-
-housekeeper_t g_housekeeper;
-void loadSo(){
+int loadSo(){
     map_context.lib_handle = dlopen("./libmapgen_c.so", RTLD_LAZY);
     if (!map_context.lib_handle) {
-        perror("dlopen");
-        exit(1);
+        const char *error = dlerror();
+        logmsg("dlopen: %s", error?error : "Unknown error");
+        return (1);
     }
     map_context.get_info = (get_terrain_info_t)dlsym(map_context.lib_handle, "mapgen_get_terrain_info");
     if (!map_context.get_info) {
-        perror("dlsym");
-        exit(1);
+        const char *error = dlerror();
+        logmsg("dlopen: %s", error?error : "Unknown error");
+        return (1);
     }
     map_context.mapgen_finish = (mapgen_finish_t)dlsym(map_context.lib_handle, "mapgen_finish");
     if (!map_context.mapgen_finish) {
-        perror("dlsym");
-        exit(1);
+        const char *error = dlerror();
+        logmsg("dlopen: %s", error?error : "Unknown error");
+        return (1);
     }
     map_context.mapgen_init = (mapgen_init_t)dlsym(map_context.lib_handle, "mapgen_init");
     if (!map_context.mapgen_init) {
-        perror("dlsym");
-        exit(1);
+        const char *error = dlerror();
+        logmsg("dlopen: %s", error?error : "Unknown error");
+        return (1);
     }
     g_housekeeper.mapgen_loaded = 1U;
     g_housekeeper.last_mapgen_use = time(NULL);
+    return (0);
 }
 void closeSo(){
     if (map_context.lib_handle) {
@@ -191,37 +218,40 @@ void closeSo(){
         g_housekeeper.mapgen_loaded = 0U;
     }
 }
-void send_response(int client, int status_code, const char *content_type, const char *body) {
-    const char *status_text;
-    switch (status_code) {
-        case 200: status_text = "OK"; break;
-        case 404: status_text = "Not Found"; break;
-        case 500: status_text = "Internal Server Error"; break;
-        default: status_text = "OK"; break;
+int start_map_context(void){
+    if (!g_housekeeper.running) {
+        logmsg("Housekeeper is not running");
+        return 1;
     }
-    dprintf(client, "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %lu\r\n\r\n",
-        status_code, status_text, content_type, strlen(body));
-    write(client, body, strlen(body));
-}
-void send_file(int client, const char *content_type, const char *path) {
-    FILE *f = fopen(path, "rb");
-    if (!f) {
-        dprintf(client, "HTTP/1.1 404 Not Found\r\n\r\n");
-        return;
+    g_housekeeper.last_mapgen_use = time(NULL);
+    if (g_housekeeper.mapgen_loaded) {
+        // logmsg("Mapgen already loaded");
+        return 0;
     }
-    dprintf(client, "HTTP/1.1 200 OK\r\nContent-Type: %s\r\n\r\n", content_type);
-    char buf[4096];
-    size_t n;
-    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) write(client, buf, n);
-    fclose(f);
+    loadSo();
+    if (!g_housekeeper.mapgen_loaded) {
+        logmsg("Failed to load mapgen");
+        return 1;
+    }
+    return 0;
+}
+int stop_map_context(void){
+    if (!g_housekeeper.running) {
+        logmsg("Housekeeper is not running");
+        return 1;
+    }
+    if (!g_housekeeper.mapgen_loaded) {
+        logmsg("Mapgen not loaded");
+        return 0;
+    }
+    g_housekeeper.last_mapgen_use = time(NULL);
+    return 0;
+}
+int get_map_info(TerrainInfo *info, float lat, float lon) {
+    *info = map_context.get_info(lat,lon);
+    return 0;
 }
 
-
-typedef struct {
-    int interval;
-} plugin_timer_t;
-
-int file_exists_recent(const char *path, int interval);
 void plugin_start_timer(PCHANDLER pc, int interval, void (*callback)(PCHANDLER)){
     (void)pc;
     (void)interval;
@@ -232,25 +262,118 @@ void plugin_stop_timer(PCHANDLER pc){
     (void)pc;
     // Stop the timer for the plugin
 }
+int image_context_start(PluginContext *pc){
+    if (!pc) pc=get_plugin_context("image");
+    if (pc){
+        plugin_start(pc->id);
+        //pc->image.start_image_context(pc);
+        return 0;
+    }
+    return 1;
+}
+int image_context_stop(PluginContext *pc){
+    if (!pc) pc=get_plugin_context("image");
+    if (pc){
+        //pc->image.stop_image_context(pc);
+        plugin_stop(pc->id);
+    }
+    return 0;
+}
+int image_create(PluginContext *pc, Image *image, const char *filename, unsigned int width, unsigned int height, ImageBackendType backend, ImageFormat format, ImageBufferFormat buffer_type){
+    if (pc){
+        pc->image.create(pc, image, filename, width, height, backend, format, buffer_type);
+        return 0;
+    }else{
+        logmsg("No image plugin");
+    }
+    return 1;
+}
+int image_destroy(PluginContext *pc, Image *image){
+    if (pc) {
+        pc->image.destroy(pc, image);
+        return 0;
+    }
+    return 1;
+}
+void image_get_buffer(PluginContext *pc, Image *image, void** buffer){
+    if (pc) {
+        pc->image.get_buffer(pc, image, buffer);
+    }
+}
+void image_write_row(PluginContext *pc, Image *image, void *row){
+    if (pc) {
+        pc->image.write_row(pc, image, row);
+    }
+}
+void register_http_routes(PluginContext *ctx, int count, const char *routes[]) {
+    ctx->http_route_count = count;
+    ctx->http_routes = malloc(count * sizeof(HttpRouteRule));
+    if (!ctx->http_routes) {
+        logmsg("Failed to allocate memory for HTTP routes");
+        return;
+    }
+    for (int i = 0; i < count; i++) {
+        int len = strlen(routes[i]);
+        ctx->http_routes[i] = malloc(len + 1);
+        snprintf(ctx->http_routes[i], len + 1, "%s", routes[i]); // it could be also /plugin/pluginnname, etc...
+    }
+}
+void register_db_queue(PluginContext *ctx, const char *db){
+    //placeholder function
+    (void)ctx;
+    (void)db;
+}
 
-#define MAX_PLUGIN 10
-int g_PluginCount = 0;
-PluginContext g_Plugins[MAX_PLUGIN];
-const PluginHostInterface g_plugin_host = {
-    .register_http_route = (void*)register_http_routes,
-    .get_plugin_context = NULL,
+PluginContext* get_plugin_context(const char *name){
+    if (!name) return NULL;
+    char pname[MAX_PATH];
+    snprintf(pname, sizeof(pname), "%s.so", name);
+    for (int i=0; i<g_PluginCount; i++){
+        if (!strcmp(g_Plugins[i].name, pname)){
+            return &g_Plugins[i];
+        }
+    }
+    return NULL;
+}
+PluginHostInterface g_plugin_host = {
+    .get_plugin_context = get_plugin_context,
     .start_timer = (void*)plugin_start_timer,
     .stop_timer = (void*)plugin_stop_timer,
     .logmsg = logmsg,
-    .send_response = send_response,
-    .send_file = send_file,
-    .file_exists_recent = file_exists_recent
+    .errormsg = errormsg,
+    .debugmsg = debugmsg,
+    .file_exists = file_exists,
+    .file_exists_recent = file_exists_recent,
+    .config_get_string = config_get_string,
+    .config_get_int = config_get_int,
+    .register_db_queue = register_db_queue,
+    .http = {
+        .register_http_route = register_http_routes,
+        .send_response = send_response,
+        .send_file = send_file,
+        .send_chunk_head = send_chunk_head,
+        .send_chunk_end = send_chunk_end,
+        .send_chunks = send_chunks
+    },
+    .map = {
+        .start_map_context= start_map_context,
+        .stop_map_context = stop_map_context,
+        .get_map_info = get_map_info
+    },
+    .image = {
+        .context_start = image_context_start,
+        .context_stop = image_context_stop,
+        .create = image_create,
+        .destroy = image_destroy,
+        .get_buffer = image_get_buffer,
+        .write_row = image_write_row
+    }
 };
 
 int plugin_load(const char *name, int id){
     PluginContext *pc=&g_Plugins[id];
     
-    char filename[512];
+    char filename[MAX_PLUGIN_PATH];
     snprintf(filename, sizeof(filename), "%s/%s", PLUGIN_DIR, name);
 
     struct stat st;
@@ -277,6 +400,10 @@ int plugin_load(const char *name, int id){
         dlclose(pc->handle);
         return -1;
     }
+    //thread related functions are optional
+    pc->thread_init = (plugin_thread_init_t)dlsym(pc->handle, "plugin_thread_init");
+    pc->thread_finish = (plugin_thread_finish_t)dlsym(pc->handle, "plugin_thread_finish");
+    
     pc->plugin_register = (plugin_register_t)dlsym(pc->handle, "plugin_register"); 
     if (!pc->plugin_register) {
         logmsg("Failed to find plugin_register in %s", filename);
@@ -324,11 +451,24 @@ int plugin_start(int id) {
         pc->used_count++;
         pthread_mutex_unlock(&plugin_housekeeper_mutex);
     }
+    if (pc->thread_init){
+        if (pc->thread_init(pc)) {
+            logmsg("Failed to initialize plugin thread: %s", pc->name);
+            return -1;
+        }
+    }
     return 0;
 }
 void plugin_stop(int id) {
     PluginContext *pc = &g_Plugins[id];
     if (pc->handle) {
+        if (pc->thread_finish){
+            if (pc->thread_finish(pc)) {
+                logmsg("Failed to finish plugin thread: %s", pc->name);
+                //return;
+            }
+        }
+    
         int res = geod_mutex_timedlock(&plugin_housekeeper_mutex, 20000UL);
         if (res == 0) {
             pc->last_used = time(NULL);
@@ -341,7 +481,7 @@ void plugin_stop(int id) {
 void plugin_scan_and_register() {
     DIR *dir = opendir(PLUGIN_DIR);
     if (!dir) {
-        logmsg("Cannot open plugin directory: %s", PLUGIN_DIR);
+        errormsg("Cannot open plugin directory: %s", PLUGIN_DIR);
         return;
     }
 
@@ -359,18 +499,19 @@ void plugin_scan_and_register() {
 
         if (!known && g_PluginCount < MAX_PLUGIN) {
             PluginContext *pc = &g_Plugins[g_PluginCount];
+            pc->http_route_count=0;
             int res = plugin_load(entry->d_name, g_PluginCount);
             strncpy(pc->name, entry->d_name, sizeof(pc->name) - 1);
             pc->id = g_PluginCount;
             if (res == 0) {
                 int rr = pc->plugin_register(pc, &g_plugin_host);
                 if (rr == 0) {
-                    logmsg("Plugin registered: %s", entry->d_name);
+                    debugmsg("Plugin registered: %s", entry->d_name);
                 } else {
-                    logmsg("Plugin registration failed: %s", entry->d_name);
+                    errormsg("Plugin registration failed: %s", entry->d_name);
                 }
             } else {
-                logmsg("Plugin load failed: %s", entry->d_name);
+                errormsg("Plugin load failed: %s", entry->d_name);
             }
             g_PluginCount++;
         }
@@ -379,35 +520,6 @@ void plugin_scan_and_register() {
     closedir(dir);
 }
 
-int start_map_context(void){
-    if (!g_housekeeper.running) {
-        logmsg("Housekeeper is not running");
-        return 1;
-    }
-    g_housekeeper.last_mapgen_use = time(NULL);
-    if (g_housekeeper.mapgen_loaded) {
-        // logmsg("Mapgen already loaded");
-        return 0;
-    }
-    loadSo();
-    if (!g_housekeeper.mapgen_loaded) {
-        logmsg("Failed to load mapgen");
-        return 1;
-    }
-    return 0;
-}
-int stop_map_context(void){
-    if (!g_housekeeper.running) {
-        logmsg("Housekeeper is not running");
-        return 1;
-    }
-    if (!g_housekeeper.mapgen_loaded) {
-        logmsg("Mapgen not loaded");
-        return 0;
-    }
-    g_housekeeper.last_mapgen_use = time(NULL);
-    return 0;
-}
 void housekeeper_plugins(time_t now ){
     for (int i = 0; i < g_PluginCount; i++) {
         PluginContext *pc = &g_Plugins[i];
@@ -416,7 +528,7 @@ void housekeeper_plugins(time_t now ){
                 time_t last = (time_t)pc->last_used;
                 if (difftime(now, last) > PLUGIN_IDLE_TIMEOUT) {
                     plugin_unload(i);
-                    logmsg("Plugin unloaded: %s", pc->name);
+                    debugmsg("Plugin unloaded: %s", pc->name);
                 }
             }
         }
@@ -430,7 +542,7 @@ void housekeeper_plugins(time_t now ){
 void housekeeper_mapgen(time_t now ){
     if (g_housekeeper.mapgen_loaded) {
         if (g_housekeeper.last_mapgen_use + MAPGEN_IDLE_TIMEOUT < now) {
-            logmsg("Mapgen idle timeout. Unloading mapgen");
+            debugmsg("Mapgen idle timeout. Unloading mapgen");
             if (map_context.mapgen_finish) {
                 map_context.mapgen_finish();
                 closeSo();
@@ -459,8 +571,6 @@ void *housekeeper_thread(void *arg) {
 void start_housekeeper() {
     g_housekeeper.running = 1U;
     g_housekeeper.mapgen_loaded = 0U;
-    g_housekeeper.mysql_loaded = 0U;
-    g_housekeeper.png_loaded = 0U;
     if (pthread_create(&g_housekeeper.thread_id, NULL, housekeeper_thread, NULL) != 0) {
         perror("Failed to create housekeeper thread");
         exit(1);
@@ -472,86 +582,6 @@ void stop_housekeeper() {
     pthread_join(g_housekeeper.thread_id, NULL);
 }
 
-void parse_http_request(ClientContext *ctx, HttpRequest *req) {
-    memset(req, 0, sizeof(HttpRequest));
-
-    char *line = strtok(ctx->request_buffer, "\r\n");
-    if (!line) return;
-
-    sscanf(line, "%7s %255s", req->method, req->path);
-
-    char *query_start = strchr(req->path, '?');
-    if (query_start) {
-        *query_start = '\0';
-        query_start++;
-        char *param = strtok(query_start, "&");
-        while (param && req->query_count < MAX_QUERY_VARS) {
-            char *eq = strchr(param, '=');
-            if (eq) {
-                *eq = '\0';
-                strncpy(req->query[req->query_count].key, param, sizeof(req->query[req->query_count].key) - 1);
-                strncpy(req->query[req->query_count].value, eq + 1, sizeof(req->query[req->query_count].value) - 1);
-                req->query_count++;
-            }
-            param = strtok(NULL, "&");
-        }
-    }
-
-    while ((line = strtok(NULL, "\r\n")) && *line && req->header_count < MAX_HEADER_LINES) {
-        char *sep = strchr(line, ':');
-        if (sep) {
-            *sep = '\0';
-            char *key = line;
-            char *val = sep + 1;
-            while (isspace(*val)) val++;
-            strncpy(req->headers[req->header_count].key, key, sizeof(req->headers[req->header_count].key) - 1);
-            strncpy(req->headers[req->header_count].value, val, sizeof(req->headers[req->header_count].value) - 1);
-            req->header_count++;
-        }
-    }
-}
-
-void print_png_version() {
-    logmsg("libpng version (static, dynamic, mutex): %s, %s, %s", PNG_LIBPNG_VER_STRING, png_libpng_ver, HAVE_OLD_PNG ? "yes" : "no");
-}
-int PngImage_init(PngImage *img, int width, int height, const char *filename, unsigned char color_type) {
-    img->width = width;
-    img->height = height;
-    img->filename = filename;
-    img->tmp_filename[0] = '\0';
-    snprintf(img->tmp_filename, sizeof(img->tmp_filename), "%s_", filename);
-    logmsg("Opening PNG file for writing. %s", img->tmp_filename);
-    img->fp = fopen(img->tmp_filename, "wb");
-    if (!img->fp) {
-        logmsg("Failed to open PNG file for writing. %s", filename);
-        return 1;
-    }
-    PNG_CRITICAL_START();
-    img->png_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
-    img->info_ptr = png_create_info_struct(img->png_ptr);
-    if (!img->png_ptr || !img->info_ptr) {
-        fclose(img->fp);
-        logmsg("Failed to create PNG structures.");
-        return 2;
-    }
-    png_init_io(img->png_ptr, img->fp);
-    png_set_IHDR(img->png_ptr, img->info_ptr, img->width, img->height,
-                 8, color_type, PNG_INTERLACE_NONE,
-                 PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);
-    png_write_info(img->png_ptr, img->info_ptr);
-    return 0;
-}
-
-void PngImage_finish(PngImage *img) {
-    png_write_end(img->png_ptr, NULL);
-    png_destroy_write_struct(&img->png_ptr, &img->info_ptr);
-    fclose(img->fp);
-    int res=rename(img->tmp_filename, img->filename);
-    if (res != 0) {
-        logmsg("Failed to rename %s to %s", img->tmp_filename, img->filename);
-    }
-    PNG_CRITICAL_END();
-}
 int file_exists(const char *filename) {
     struct stat st;
     if (stat(filename, &st) != 0) return 0; // nem létezik
@@ -563,94 +593,6 @@ int file_exists_recent(const char *filename, int max_age_seconds) {
 
     time_t now = time(NULL);
     return (now - st.st_mtime) < max_age_seconds;
-}
-
-void generate_biome_png(RequestParams *params, const char *filename) {
-    // Create a PNG image with the specified dimensions
-    PngImage img;
-    if (PngImage_init(&img, params->width, params->height, filename, PNG_COLOR_TYPE_RGB)) {
-        logmsg("Failed to initialize PNG image.");
-        return;
-    }
-    for (unsigned int y = 0; y < img.height; y++) {
-        png_bytep row = malloc(3 * img.width);
-        float lat = params->lat_max - ((params->lat_max - params->lat_min) / img.height) * y;
-        for (unsigned int x = 0; x < img.width; x++) {
-            float lon = params->lon_min + ((params->lon_max - params->lon_min) / img.width) * x;
-            TerrainInfo info = map_context.get_info(lat, lon);
-            row[x*3 + 0] = info.r;
-            row[x*3 + 1] = info.g;
-            row[x*3 + 2] = info.b;
-        }
-        png_write_row(img.png_ptr, row);
-        free(row);
-    }
-    PngImage_finish(&img);
-    logmsg("Biome PNG generated: %s", filename);
-}
-void generate_elevation_png(RequestParams *params, const char *filename) {
-    PngImage img;
-    if (PngImage_init(&img, params->width, params->height, filename, PNG_COLOR_TYPE_GRAY)) {
-        logmsg("Failed to initialize PNG image.");
-        return;
-    }
-    for (unsigned int y = 0; y < img.height; y++) {
-        png_bytep row = malloc(3 * img.width);
-        float lat = params->lat_max - ((params->lat_max - params->lat_min) / img.height) * y;
-        for (unsigned int x = 0; x < img.width; x++) {
-            float lon = params->lon_min + ((params->lon_max - params->lon_min) / img.width) * x;
-            TerrainInfo info = map_context.get_info(lat, lon);
-            int elevation = info.elevation * 255.0f;
-            if (elevation < 0) elevation = 0;
-            if (elevation > 255) elevation = 255;
-            row[x] = elevation;
-        }
-        png_write_row(img.png_ptr, row);
-        free(row);
-    }
-    PngImage_finish(&img);
-    logmsg("Elevation PNG generated: %s", filename);
-}
-void generate_clouds_png(RequestParams *params, const char *filename) {
-    PngImage img;
-    if (PngImage_init(&img, params->width, params->height, filename, PNG_COLOR_TYPE_RGBA)) {
-        logmsg("Failed to initialize PNG image.");
-        return;
-    }
-    for (unsigned int y = 0; y < img.height; y++) {
-        png_bytep row = malloc(4 * img.width);
-        float lat = params->lat_max - ((params->lat_max - params->lat_min) / img.height) * y;
-        for (unsigned int x = 0; x < img.width; x++) {
-            float lon = params->lon_min + ((params->lon_max - params->lon_min) / img.width) * x;
-            TerrainInfo info = map_context.get_info(lat, lon);
-            row[x*4 + 0] = 255;
-            row[x*4 + 1] = 255;
-            row[x*4 + 2] = 255;
-            row[x*4 + 3] = info.precip;
-        }
-        png_write_row(img.png_ptr, row);
-        free(row);
-    }
-    PngImage_finish(&img);
-
-    logmsg("Clouds PNG generated: %s", filename);
-}
-
-typedef struct {
-    float lat, lon;
-    float elevation;
-    unsigned char r, g, b;
-    char name[128];
-} RegionsDataRecord;
-
-int cached_regions_chunk_json(char *filename) {
-    FILE *fp = fopen(filename, "rb");
-    if (!fp) {
-        logmsg("Failed to open regions file for reading");
-        return 0;
-    }
-    fclose(fp);
-    return 1;
 }
 
 void handle_status_html(ClientContext *ctx, RequestParams *params) {
@@ -676,7 +618,11 @@ void handle_status_html(ClientContext *ctx, RequestParams *params) {
     for (int i = 0; i < g_PluginCount; i++) {
         PluginContext *pc = &g_Plugins[i];
         if (pc->handle) {
-            offset += snprintf(html + offset, sizeof(html) - offset, "<li>%d: %s  (used:%d)</li>", pc->id, pc->name, pc->used_count );
+            offset += snprintf(html + offset, sizeof(html) - offset, "<li>%d: %s  (used:%d) ", pc->id, pc->name, pc->used_count );
+            for (int j = 0; j < pc->http_route_count; j++) {
+                offset += snprintf(html + offset, sizeof(html) - offset, "[<a href=\"%s\">%s</a>] ", pc->http_routes[j], pc->http_routes[j] );
+            }
+            offset += snprintf(html + offset, sizeof(html) - offset, "</li>");
         }
     }
     offset += snprintf(html + offset, sizeof(html) - offset, "</ul>");
@@ -684,7 +630,11 @@ void handle_status_html(ClientContext *ctx, RequestParams *params) {
     for (int i = 0; i < g_PluginCount; i++) {
         PluginContext *pc = &g_Plugins[i];
         if (!pc->handle) {
-            offset += snprintf(html + offset, sizeof(html) - offset, "<li>%d: %s</li>", pc->id, pc->name );
+            offset += snprintf(html + offset, sizeof(html) - offset, "<li>%d: %s ", pc->id, pc->name );
+            for (int j = 0; j < pc->http_route_count; j++) {
+                offset += snprintf(html + offset, sizeof(html) - offset, "[<a href=\"%s\">%s</a>] ", pc->http_routes[j], pc->http_routes[j] );
+            }
+            offset += snprintf(html + offset, sizeof(html) - offset, "</li>");
         }
     }
     offset += snprintf(html + offset, sizeof(html) - offset, "</ul>");
@@ -699,258 +649,7 @@ void handle_status_json(ClientContext *ctx, RequestParams *params) {
     (void)params; // suppress unused parameter warning
     const char *json = "{\"status\":\"running\"}";
     send_response(ctx->socket_fd, 200, "application/json", json);
-    logmsg("%s status_json request", ctx->client_ip);
-}
-
-void handle_regions_chunk_json(ClientContext *ctx, RequestParams *params) {
-    
-    char cache_filename[128];
-    snprintf(cache_filename, sizeof(cache_filename), "../var/regions_lat%.2f_lon%.2f_lat%.2f_lon%.2f.json",
-        params->lat_min, params->lon_min, params->lat_max, params->lon_max );
-    if (file_exists_recent(cache_filename, CACHE_TIME)) {
-        logmsg("Regions chunk JSON file is up to date: %s", cache_filename);
-        send_file(ctx->socket_fd, "application/json", cache_filename);
-        return;
-    }
-    FILE *fp;
-    if (!file_exists(REGIONS_FILE)) {
-        fp = fopen(REGIONS_FILE, "wb");
-        if (!fp) {
-            logmsg("Failed to open regions file for writing");
-            send_response(ctx->socket_fd, 500, "text/plain", "Failed to open regions file for writing\n");
-            return;
-        }
-        logmsg("Generating new regions file: %s", REGIONS_FILE);
-        start_map_context();
-        for (float lat = -70.0f; lat <= 70.0f; lat += 0.5f) {
-            for (float lon = -180.0f; lon <= 180.0f; lon += 0.5f) {
-                TerrainInfo info = map_context.get_info(lat, lon);
-                if (info.elevation > 0.0f && info.elevation < 0.6f) {
-                    int needed  = rand() % 300;
-                    if (needed == 1) {
-                        RegionsDataRecord region;
-                        region.lat = lat;
-                        region.lon = lon;
-                        region.elevation = info.elevation;
-                        region.r = info.r;
-                        region.g = info.g;
-                        region.b = info.b;
-                        snprintf(region.name, sizeof(region.name), "city-%04d", rand()%10000);
-                        fwrite(&region, sizeof(RegionsDataRecord), 1, fp);
-                    }
-                }
-            }
-        }
-        stop_map_context();
-        fclose(fp);
-    }
-    fp = fopen(REGIONS_FILE, "rb");
-    if (fp){
-        #define REGIONS_JSON_SIZE_LIMIT (1024*1024*10)
-        char *json = malloc(REGIONS_JSON_SIZE_LIMIT); // Rough estimate for space
-        if (!json) {
-            dprintf(ctx->socket_fd, "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n");
-            return;
-        }
-        strcpy(json, "{");
-        int offset = 1; // skipping opening brace
-        while(!feof(fp)) {
-            RegionsDataRecord region;
-            if (fread(&region, sizeof(RegionsDataRecord), 1, fp) == 1) {
-                // filter to the provided region bounds
-                if (region.lat >= params->lat_min && region.lat <= params->lat_max &&
-                    region.lon >= params->lon_min && region.lon <= params->lon_max) {
-                    char keyval[256];
-                    int keyval_len = snprintf(keyval, sizeof(keyval), "\"%.2f,%.2f\":{\"r\":%d,\"g\":%d,\"b\":%d,\"e\":%.2f,\"name\":\"%s\"},",
-                             region.lat, region.lon, region.r, region.g, region.b, region.elevation, region.name);
-                    if (offset + keyval_len +1 > REGIONS_JSON_SIZE_LIMIT) {
-                        logmsg("Regions JSON size limit exceeded");
-                        dprintf(ctx->socket_fd, "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n");
-                        free(json);
-                        fclose(fp);
-                        return;
-                    }
-                    strcpy(json + offset, keyval);
-                    offset += keyval_len;  
-                    json[offset+1] = '\0'; // null-terminate the string
-                }
-            }
-        }
-        if (offset > 1) json[offset - 1] = '}'; // replace last comma with closing brace
-        else strcpy(json + offset, "}");
-        json[offset+1] = '\0'; // null-terminate the string
-        send_response(ctx->socket_fd, 200, "application/json", json);
-        logmsg("%s regions_chunk_json request", ctx->client_ip);
-        
-        FILE *fp_out = fopen(cache_filename, "w");
-        if (!fp_out) {
-            logmsg("Failed to open regions file for writing");
-        }else{
-            fwrite(json, 1, strlen(json), fp_out);
-            fclose(fp_out);
-        }
-        free(json);
-        fclose(fp);
-    } else {
-        logmsg("Failed to open regions file for reading");
-    }
-}
-void handle_map_json(ClientContext *ctx, RequestParams *params) {
-    double lat_min = params->lat_min;
-    double lat_max = params->lat_max;
-    double lon_min = params->lon_min;
-    double lon_max = params->lon_max;
-    double step = params->step > 0 ? params->step : 0.5;
-
-    if (lat_min >= lat_max || lon_min >= lon_max || step <= 0) {
-        dprintf(ctx->socket_fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n");
-        return;
-    }
-
-    int point_count = (int)(((lat_max - lat_min) / step) * ((lon_max - lon_min) / step));
-    if (point_count > 50000) {
-        dprintf(ctx->socket_fd, "HTTP/1.1 413 Request Entity Too Large\r\nContent-Length: 0\r\n\r\n");
-        return;
-    }else if (point_count<1) {
-        dprintf(ctx->socket_fd, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n");
-        return;
-    }
-    
-
-    char *json = malloc(10 + point_count * 100); // Rough estimate for space
-    if (!json) {
-        dprintf(ctx->socket_fd, "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n");
-        return;
-    }
-    if (start_map_context()){
-        logmsg("Failed to start map context");
-        free(json);
-        send_response(ctx->socket_fd, 500, "text/plain", "Failed to start map context\n");
-        return;   
-    }
-    strcpy(json, "{");
-    int offset = 1; // skipping opening brace
-    for (double lat = lat_min; lat <= lat_max; lat += step) {
-        for (double lon = lon_min; lon <= lon_max; lon += step) {
-            TerrainInfo info = map_context.get_info(lat, lon);
-            char keyval[128];
-            snprintf(keyval, sizeof(keyval), "\"%.2f,%.2f\":{\"r\":%d,\"g\":%d,\"b\":%d,\"e\":%.2f},",
-                     lat, lon, info.r, info.g, info.b, info.elevation);
-            strcpy(json + offset, keyval);
-            offset += strlen(keyval);
-        }
-    }
-    stop_map_context();
-    if (offset > 1) json[offset - 1] = '}'; // replace last comma with closing brace
-    else strcpy(json + offset, "}");
-    json[offset+1] = '\0'; // null-terminate the string
-    send_response(ctx->socket_fd, 200, "application/json", json);
-    logmsg("%s map_json request", ctx->client_ip);
-    free(json);
-}
-void handle_biome(ClientContext *ctx, RequestParams *params) {
-    char filename[128];
-    snprintf(filename, sizeof(filename), "../var/biome_lat%.2f_lon%.2f_%dx%d.png",
-        params->lat_min, params->lon_min, 
-        params->width, params->height);
-    if (!file_exists_recent(filename, CACHE_TIME)) {
-        logmsg("Generating new biome PNG: %s", filename);
-        if (start_map_context()) {
-            logmsg("Failed to start map context");
-            send_response(ctx->socket_fd, 500, "text/plain", "Failed to start map context\n");
-            return;
-        }
-        generate_biome_png(params, filename);
-        stop_map_context();
-    } else {
-        logmsg("Using cached biome PNG: %s", filename);
-    }
-    //logmsg("%s biome request", ctx->client_ip);
-    send_file(ctx->socket_fd, "image/png", filename);
-}
-
-void handle_elevation(ClientContext *ctx, RequestParams *params) {
-    char filename[128];
-    snprintf(filename, sizeof(filename), "../var/elevation_lat%.2f_lon%.2f_%dx%d.png",
-        params->lat_min, params->lon_min, 
-        params->width, params->height);
-    if (!file_exists_recent(filename, 60)) {
-        logmsg("Generating new elevation PNG: %s", filename);
-        if (start_map_context()) {
-            logmsg("Failed to start map context");
-            send_response(ctx->socket_fd, 500, "text/plain", "Failed to start map context\n");
-            return;
-        }
-        generate_elevation_png(params, filename);
-        stop_map_context();
-    } else {
-        logmsg("Using cached elevation PNG: %s", filename);
-    }
-    send_file(ctx->socket_fd, "image/png", filename);
-}
-void handle_clouds(ClientContext *ctx, RequestParams *params) {
-    char filename[128];
-    snprintf(filename, sizeof(filename), "../var/clouds_lat%.2f_lon%.2f_%dx%d.png",
-        params->lat_min, params->lon_min, 
-        params->width, params->height);
-    if (!file_exists_recent(filename, 60)) {
-        logmsg("Generating new elevation PNG: %s", filename);
-        if (start_map_context()) {
-            logmsg("Failed to start map context");
-            send_response(ctx->socket_fd, 500, "text/plain", "Failed to start map context\n");
-            return;
-        }
-        generate_clouds_png(params, filename);
-        stop_map_context();
-    } else {
-        logmsg("Using cached elevation PNG: %s", filename);
-    }
-    send_file(ctx->socket_fd, "image/png", filename);
-}
-
-void parse_request_path_and_params(const char *request, RequestParams *params) {
-    memset(params, 0, sizeof(RequestParams));
-    strncpy(params->path, "/", sizeof(params->path));
-    params->lat_min = -90.0f;
-    params->lat_max = 90.0f;
-    params->lon_min = -180.0f;
-    params->lon_max = 180.0f;
-    params->step = 0.5f;
-    params->width = 1024;
-    params->height = 512;
-    params->id = 0;
-
-    const char *line = strstr(request, "GET ");
-    if (!line) return;
-    line += 4;
-    const char *space = strchr(line, ' ');
-    if (!space) return;
-
-    char path_query[1024];
-    size_t len = space - line;
-    if (len >= sizeof(path_query)) len = sizeof(path_query) - 1;
-    strncpy(path_query, line, len);
-    path_query[len] = '\0';
-
-    char *query = strchr(path_query, '?');
-    if (query) {
-        *query++ = '\0';
-        char *token = strtok(query, "&");
-        while (token) {
-            float fval;
-            int ival;
-            if (sscanf(token, "lat_min=%f", &fval) == 1) params->lat_min = fval;
-            else if (sscanf(token, "lat_max=%f", &fval) == 1) params->lat_max = fval;
-            else if (sscanf(token, "lon_min=%f", &fval) == 1) params->lon_min = fval;
-            else if (sscanf(token, "lon_max=%f", &fval) == 1) params->lon_max = fval;
-            else if (sscanf(token, "width=%d", &ival) == 1) params->width = ival;
-            else if (sscanf(token, "height=%d", &ival) == 1) params->height = ival;
-            else if (sscanf(token, "step=%f", &fval) == 1) params->step = fval;
-            else if (sscanf(token, "id=%d", &ival) == 1) params->id = ival;
-            token = strtok(NULL, "&");
-        }
-    }
-    strncpy(params->path, path_query, sizeof(params->path)-1);
+    //logmsg("%s status_json request", ctx->client_ip);
 }
 
 void infopage(ClientContext *ctx, RequestParams *params) {
@@ -969,34 +668,50 @@ void infopage(ClientContext *ctx, RequestParams *params) {
         "</body></html>"
     );
 }
-
-int http_routes_count = 8;
-const HttpRouteRule http_routes[] = {
-    {"/map", handle_map_json},
-    {"/biome", handle_biome},
-    {"/elevation", handle_elevation},
-    {"/clouds", handle_clouds},
-    {"/regions_chunk", handle_regions_chunk_json},
-    {"/status.html", handle_status_html},
-    {"/status.json", handle_status_json},
-    {"/", infopage},
-};
-
-void register_http_routes(PluginContext *ctx, int count, const char *routes[]) {
-    ctx->http_route_count = count;
-    ctx->http_routes = malloc(count * sizeof(HttpRouteRule));
-    if (!ctx->http_routes) {
-        logmsg("Failed to allocate memory for HTTP routes");
-        return;
+void test_image(ClientContext *ctx, RequestParams *params) {
+    char filename[MAX_PATH];
+    snprintf(filename, sizeof(filename), "%s/test_lat%.2f_lon%.2f_%dx%d.png",
+        g_cache_dir,
+        params->lat_min, params->lon_min, 
+        params->width, params->height);
+    if (!file_exists_recent(filename, CACHE_TIME)) {
+        logmsg("Generating new biome PNG: %s", filename);
+        if (start_map_context()) {
+            logmsg("Failed to start map context");
+            send_response(ctx->socket_fd, 500, "text/plain", "Failed to start map context\n");
+            return;
+        }
+        PluginContext *pcimg= get_plugin_context("image");
+        if (pcimg){
+            image_context_start(pcimg);
+            Image img;
+            if (image_create(pcimg, &img, "test.png", 320, 200, ImageBackend_Png, ImageFormat_RGB, ImageBuffer_AoS)){
+                for (unsigned int y = 0; y < img.height; y++) {
+                    png_bytep row = malloc(3 * img.width);
+                    float lat = params->lat_max - ((params->lat_max - params->lat_min) / img.height) * y;
+                    for (unsigned int x = 0; x < img.width; x++) {
+                        float lon = params->lon_min + ((params->lon_max - params->lon_min) / img.width) * x;
+                        TerrainInfo info = map_context.get_info(lat, lon);
+                        row[x*3 + 0] = info.r;
+                        row[x*3 + 1] = info.g;
+                        row[x*3 + 2] = info.b;
+                    }
+                    image_write_row(pcimg, &img, row); //png_write_row(img.png_ptr, row);
+                    free(row);
+                }
+                image_destroy(pcimg, &img);  // PngImage_finish(&img);
+                logmsg("Test PNG generated: %s", filename);
+            }
+            image_context_stop(pcimg);
+        }
+        stop_map_context();
+    } else {
+        logmsg("Using cached test PNG: %s", filename);
     }
-    for (int i = 0; i < count; i++) {
-        int len = strlen(routes[i]);
-        ctx->http_routes[i] = malloc(len + 1);
-        snprintf(ctx->http_routes[i], len + 1, "%s", routes[i]); // it could be also /plugin/pluginnname, etc...
-    }
+    send_file(ctx->socket_fd, "image/png", filename);
 }
 
-void *handle_client(void *arg) {
+void *http_handle_client(void *arg) {
     ClientContext *ctx = (ClientContext *)arg;
     int len = read(ctx->socket_fd, ctx->request_buffer, BUF_SIZE - 1);
     if (len <= 0) {
@@ -1005,7 +720,7 @@ void *handle_client(void *arg) {
         return NULL;
     }
     ctx->request_buffer[len] = '\0';
-    parse_http_request(ctx, &ctx->request);
+    http_parse_request(ctx, &ctx->request);
     char *xfor = strcasestr(ctx->request_buffer, "x-forwarded-for:");
     if (xfor) {
         xfor += strlen("x-forwarded-for:");
@@ -1038,7 +753,7 @@ void *handle_client(void *arg) {
                     free(ctx);
                     return NULL;
                 } else {
-                    logmsg("Plugin %s is busy", pc->name);
+                    errormsg("Plugin %s is busy", pc->name);
                     dprintf(ctx->socket_fd, "HTTP/1.1 503 Service Unavailable\r\n\r\n");
                     close(ctx->socket_fd);
                     free(ctx);
@@ -1054,20 +769,71 @@ void *handle_client(void *arg) {
     return NULL;
 }
 
+// Initialize cache directory: create if missing, cleanup old cache files
+void cache_init(const char *path) {
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        if (mkdir(path, 0755) != 0) {
+            errormsg("Failed to create cache directory: %s", path);
+            return;
+        } else {
+            logmsg("Created cache directory: %s", path);
+            return;
+        }
+    }
+
+    DIR *dir = opendir(path);
+    if (!dir) {
+        errormsg("Cannot open cache directory: %s", path);
+        return;
+    }
+    if (config_get_int("CACHE", "cleanup_on_start",1)){
+        struct dirent *entry;
+        char filepath[MAX_PATH];
+        int count_deleted = 0;
+        int count_failed = 0;
+        int count_others = 0;
+        while ((entry = readdir(dir)) != NULL) {
+            if (entry->d_type != DT_REG) continue;
+            const char *name = entry->d_name;
+            if (strstr(name, ".png") || strstr(name, ".png_") || strstr(name, ".json") || strstr(name, ".html")) {
+                snprintf(filepath, sizeof(filepath), "%s/%s", path, name);
+                if (unlink(filepath) == 0) {
+                    count_deleted++;
+                    // logmsg("Deleted cache file: %s", filepath);
+                } else {
+                    count_failed++;
+                    debugmsg("Failed to delete file: %s", filepath);
+                }
+            }else {
+                count_others++;
+            }
+        }
+        if (count_deleted + count_failed + count_others > 0) {
+            logmsg("Cleanup on start: Deleted %d cache files, failed to delete %d cache files, and %d other files", count_deleted, count_failed, count_others);
+        }
+    }
+    closedir(dir);
+}
+
 int main() {
     signal(SIGINT, sigint_handler);
     signal(SIGTERM, sigterm_handler);
     signal(SIGUSR1, sigusr1_handler);
 
-    char cwd[256];
+    char cwd[MAX_PATH];
     getcwd(cwd, sizeof(cwd));
-    printf("Current working dir: %s\n", cwd);
+    config_get_string("CACHE", "dir", g_cache_dir, MAX_PATH, CACHE_DIR);
+    g_http_port = config_get_int("HTTP", "port", PORT);
+    g_debug_msg_enabled= config_get_int("LOG", "debug_msg_enabled", 0);
 
+    logmsg("GeoD starting on port %d in working dir %s", g_http_port, cwd);
+    cache_init(g_cache_dir);
+    
     atexit(remove_pidfile);
     write_pidfile_or_exit();
+    
 
-    logmsg("GeoD starting on port %d", PORT);
-    print_png_version();
     plugin_scan_and_register();
     start_housekeeper();
 
@@ -1075,7 +841,7 @@ int main() {
     struct sockaddr_in server_addr;
     memset(&server_addr, 0, sizeof(server_addr));
     server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(PORT);
+    server_addr.sin_port = htons(g_http_port);
     server_addr.sin_addr.s_addr = INADDR_ANY;
     int opt = 1;
     setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
@@ -1094,7 +860,7 @@ int main() {
         FD_ZERO(&fds);
         FD_SET(server_socket, &fds);
 
-        struct timeval timeout = {1, 0}; // 1 másodperc
+        struct timeval timeout = {1, 0}; // 1 sec
         int ret = select(server_socket + 1, &fds, NULL, NULL, &timeout);
 
         if (ret > 0 && FD_ISSET(server_socket, &fds)) {
@@ -1106,7 +872,7 @@ int main() {
             ctx->socket_fd = client_fd;
             inet_ntop(AF_INET, &client_addr.sin_addr, ctx->client_ip, sizeof(ctx->client_ip));
             pthread_t thread_id;
-            pthread_create(&thread_id, NULL, handle_client, ctx);
+            pthread_create(&thread_id, NULL, http_handle_client, ctx);
             pthread_detach(thread_id);
         } else if (ret == 0) {
             // timeout, restart loop, meanwhile we can check if keep_running is set to 0

@@ -1,0 +1,16 @@
+{
+	"folders": [
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		"files.associations": {
+			"__locale": "c",
+			"ios": "c",
+			"perlin3d.h": "c",
+			"in.h": "c"
+		},
+		"github.copilot.inlineSuggest.enable": false
+	}
+}

@@ -19,7 +19,7 @@ void handle_hello(PluginContext *pc, ClientContext *ctx, RequestParams *params) 
     (void)params; // Unused parameter
     (void)ctx; // Unused parameter
     const char *body = "{\"msg\":\"Hello from plugin!\"}";
-    g_host->send_response(ctx->socket_fd, 200, "application/json", body);
+    g_host->http.send_response(ctx->socket_fd, 200, "application/json", body);
     g_host->logmsg("%s hello request", ctx->client_ip);
 }
 
@@ -28,7 +28,7 @@ int plugin_http_get_routes_count = 1;
 
 int plugin_register(PluginContext *pc, const PluginHostInterface *host) {
     g_host = host;
-    host->register_http_route((void*)pc, plugin_http_get_routes_count, plugin_http_get_routes);
+    host->http.register_http_route((void*)pc, plugin_http_get_routes_count, plugin_http_get_routes);
     return PLUGIN_SUCCESS;
 }
 

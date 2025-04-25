@@ -1,0 +1,15 @@
+[HTTP]
+port=8080
+[MYSQL]
+db_host=localhost
+db_user=geo
+db_password=geoSecret123
+db_database=geo
+db_port=3306
+[SQLITE]
+db_file=../var/mapdata.sqlite
+[CACHE]
+dir=../var/cache
+cleanup_on_start=1
+[LOG]
+debug_msg_enabled=1

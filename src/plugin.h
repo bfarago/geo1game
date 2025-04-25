@@ -2,43 +2,120 @@
 #define PLUGIN_H
 
 #include "global.h"
-//#include "plugin_http.h"
 #include "http.h"
+#include "image.h"
 
 #define PLUGIN_SUCCESS 0
 #define PLUGIN_ERROR (-1)
 
-#define PCHANDLER void*
+struct PluginContext;
+#define PCHANDLER struct PluginContext*
+struct DbQuery;
+
+typedef struct TerrainInfo{
+    float elevation;
+    unsigned char r, g, b;
+    unsigned char precip, temp;
+} TerrainInfo;
+
+typedef TerrainInfo (*get_terrain_info_t)(float, float);
+
+typedef void (*mapgen_finish_t)(void);
+typedef int (*mapgen_init_t)(void);
+typedef struct{
+    void *lib_handle;
+    get_terrain_info_t get_info;
+    mapgen_finish_t mapgen_finish;
+    mapgen_init_t mapgen_init;
+} MapContext;
+
+typedef struct MapHostInterface{
+    int (*start_map_context)(void);
+    int (*stop_map_context)(void);
+    int (*get_map_info)(TerrainInfo *info, float lat, float lon);
+} MapHostInterface;
+
 typedef struct {
-    void (*register_http_route)(PCHANDLER, int cout, const char *route[]);
-    void* (*get_plugin_context)(PCHANDLER);
+    void (*register_http_route)(struct PluginContext* pc, int cout, const char *route[]);
+    void (*send_response)(int clientid, int status_code, const char *content_type, const char *body);
+    void (*send_file)(int clientid, const char * content_type, const char *path);
+    void (*send_chunk_head)(ClientContext *ctx, int status_code, const char *content_type);
+    void (*send_chunks)(ClientContext *ctx, char* buf, int offset);
+    void (*send_chunk_end)(ClientContext *ctx);
+} HttpHostInterface;
+
+typedef struct {
+    int (*context_start)(PCHANDLER pc);
+    int (*context_stop)(PCHANDLER pc);
+    int (*create)(PCHANDLER pc, Image *img, const char *filename, unsigned int width, unsigned int height, ImageBackendType backend, ImageFormat format, ImageBufferFormat buffer_format);
+    int (*destroy)(PCHANDLER pc, Image *img);
+    void (*get_buffer)(PCHANDLER pc, Image *img, void **buffer);
+    void (*write_row)(PCHANDLER pc, Image *img, void *row);
+} ImageHostInterface;
+
+typedef struct {
+    struct PluginContext* (*get_plugin_context)(const char *name);
     void (*start_timer)(PCHANDLER pc, int interval, void (*callback)(PCHANDLER));
     void (*stop_timer)(PCHANDLER pc);
     void (*logmsg)(const char *fmt, ...);
-    void (*send_response)(int clientid, int status_code, const char *content_type, const char *body);
-    void (*send_file)(int clientid, const char * content_type, const char *path);
+    void (*errormsg)(const char *fmt, ...);
+    void (*debugmsg)(const char *fmt, ...);
+    int (*file_exists)(const char *filename);
     int (*file_exists_recent)(const char *filename, int cache_time);
+    int (*config_get_string)(const char *grou, const char *key, char *buf, int buf_size, const char *default_value);
+    int (*config_get_int)(const char *grou, const char *key, int default_value);
+    void (*register_db_queue)(PCHANDLER pc, const char *name);
+    HttpHostInterface http;
+    MapHostInterface map;
+    ImageHostInterface image;
 } PluginHostInterface;
 
-
+// HTTP host side
 typedef void (*PluginHttpRequestHandler)(PCHANDLER, ClientContext *ctx, RequestParams *params);
 typedef struct {
     PluginHttpRequestHandler request_handler;
 } PluginHttpFunctions;
 
+// DB host side
+typedef void (*DbQueryResultProcessor)(void);
+typedef struct DbQuery{
+    char query[256];
+    DbQueryResultProcessor result_processor;
+} DbQuery;
+typedef void (*PluginDbRequestHandler)(PCHANDLER, DbQuery *query);
+typedef struct {
+    PluginDbRequestHandler db_request_handler;
+} PluginDbFunctions;
+// IMAGE host side
+typedef int (*PluginImageCreate)(PCHANDLER, Image *image, const char *filename, unsigned int width, unsigned int height, ImageBackendType backend, ImageFormat format, ImageBufferFormat buffer_type);
+typedef int (*PluginImageDestroy)(PCHANDLER, Image *image);
+typedef void (*PluginImageGetBuffer)(PCHANDLER, Image *image, void** buffer);
+typedef void (*PluginImageWriteRow)(PCHANDLER, Image *image, void* row);
+typedef struct PluginImageFunctions{
+    PluginImageCreate create;
+    PluginImageDestroy destroy;
+    PluginImageGetBuffer get_buffer;
+    PluginImageWriteRow write_row;
+}PluginImageFunctions;
+
+// PLUGIN host side
 typedef int (*plugin_register_t)(PCHANDLER, const PluginHostInterface*);
 typedef int (*plugin_init_t)(PCHANDLER, const PluginHostInterface*);
 typedef void (*plugin_finish_t)(PCHANDLER);
+typedef int (*plugin_thread_init_t)(PCHANDLER );
+typedef int (*plugin_thread_finish_t)(PCHANDLER );
 
-typedef struct{
+typedef struct PluginContext{
     int id;
-    char name[128];  // plugin file neve
+    char name[MAX_PLUGIN_NAME];  // plugin file neve
 
     // loaded information
     void *handle;
     plugin_register_t plugin_register;
     plugin_init_t plugin_init;
     plugin_finish_t plugin_finish;
+    plugin_thread_init_t thread_init;
+    plugin_thread_finish_t thread_finish;
     unsigned long file_mtime;
     unsigned long last_used;
     int used_count;
@@ -47,12 +124,19 @@ typedef struct{
     int http_route_count;
     char **http_routes;
 
-    // dynamic functions
+    // dynamic/optional functions
     PluginHttpFunctions http;
-
+    // DB functions
+    PluginDbFunctions db;
+    // Image functions
+    PluginImageFunctions image;
 } PluginContext;
 
-#undef PCHANDLER
-#define PCHANDLER PluginContext*
+void register_http_routes(PluginContext *ctx, int count, const char *routes[]);
 
+void register_db_queue(PluginContext *ctx, const char *db);
+
+PluginContext* get_plugin_context(const char *name);
+int plugin_start(int id);
+void plugin_stop(int id);
 #endif // PLUGIN_H
