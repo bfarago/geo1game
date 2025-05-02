@@ -9,7 +9,13 @@
 			"__locale": "c",
 			"ios": "c",
 			"perlin3d.h": "c",
-			"in.h": "c"
+			"in.h": "c",
+			"stdio.h": "c",
+			"global.h": "c",
+			"time.h": "c",
+			"http.h": "c",
+			"handlers.h": "c",
+			"signal.h": "c"
 		},
 		"github.copilot.inlineSuggest.enable": false
 	}

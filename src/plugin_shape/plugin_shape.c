@@ -134,7 +134,7 @@ int plugin_http_get_routes_count = 1;
 
 int plugin_register(PluginContext *pc, const PluginHostInterface *host) {
     g_host = host;
-    host->http.register_http_route((void*)pc, plugin_http_get_routes_count, plugin_http_get_routes);
+    host->server.register_http_route((void*)pc, plugin_http_get_routes_count, plugin_http_get_routes);
     return PLUGIN_SUCCESS;
 }
 

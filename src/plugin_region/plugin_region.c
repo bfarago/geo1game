@@ -30,6 +30,7 @@ typedef struct {
     float lat, lon;
     float elevation;
     unsigned char r, g, b;
+    unsigned char polution;
     char name[128];
 } RegionsDataRecord;
 #endif //REGIONS_BINFILE_ENABLED
@@ -112,7 +113,7 @@ int region_create_binfile(const char *fname) {
             TerrainInfo info ;
             g_host->map.get_map_info(&info,lat, lon);
             if (info.elevation > 0.0f && info.elevation < 0.6f) {
-                int needed  = rand() % 300;
+                int needed  = rand() % 200;
                 if (needed == 1) {
                     RegionsDataRecord region;
                     region.lat = lat;
@@ -121,6 +122,7 @@ int region_create_binfile(const char *fname) {
                     region.r = info.r;
                     region.g = info.g;
                     region.b = info.b;
+                    region.polution = 255-info.precip;
                     snprintf(region.name, sizeof(region.name), "city-%04d", rand()%10000);
                     fwrite(&region, sizeof(RegionsDataRecord), 1, fp);
                 }
@@ -153,8 +155,8 @@ int binfile_based_json(PluginContext *pc, ClientContext *ctx, RequestParams *par
                 if (region.lat >= params->lat_min && region.lat <= params->lat_max &&
                     region.lon >= params->lon_min && region.lon <= params->lon_max) {
                     char keyval[256];
-                    int keyval_len = snprintf(keyval, sizeof(keyval), "\"%.2f,%.2f\":{\"r\":%d,\"g\":%d,\"b\":%d,\"e\":%.2f,\"name\":\"%s\"},",
-                             region.lat, region.lon, region.r, region.g, region.b, region.elevation, region.name);
+                    int keyval_len = snprintf(keyval, sizeof(keyval), "\"%.2f,%.2f\":{\"r\":%d,\"g\":%d,\"b\":%d,\"e\":%.2f,\"p\":%d,\"name\":\"%s\"},",
+                             region.lat, region.lon, region.r, region.g, region.b, region.elevation, region.polution, region.name);
                     if (offset + keyval_len +1 > REGIONS_JSON_SIZE_LIMIT) {
                         g_host->logmsg("Regions JSON size limit exceeded");
                         g_host->http.send_response(ctx->socket_fd, 500, "text/plain", "Regions JSON size limit exceeded");
@@ -229,7 +231,7 @@ void handle_region(PluginContext *pc, ClientContext *ctx, RequestParams *params)
 }
 int plugin_register(PluginContext *pc, const PluginHostInterface *host) {
     g_host = host;
-    host->http.register_http_route((void*)pc, g_http_routes_count, g_http_routes);
+    host->server.register_http_route((void*)pc, g_http_routes_count, g_http_routes);
     return PLUGIN_SUCCESS;
 }
 

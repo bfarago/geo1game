@@ -33,10 +33,6 @@ static ConfigGroup config_groups[MAX_GROUPS];
 static int config_group_count = 0;
 static int config_initialized = 0;
 
-void logmsg(const char *fmt, ...) ;
-void errormsg(const char *fmt, ...) ;
-void debugmsg(const char *fmt, ...) ;
-
 int config_search_group(const char *group) {
     for (int i = 0; i < config_group_count; i++) {
         if (strcmp(config_groups[i].name, group) == 0) {

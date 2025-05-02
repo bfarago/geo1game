@@ -8,7 +8,7 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <sqlite3.h>
-
+#define MAX_QUERY_LEN (1024)
 static sqlite3 *g_sqlite_db = NULL;
 static pthread_mutex_t sqlite_mutex = PTHREAD_MUTEX_INITIALIZER;
 const PluginHostInterface *g_host;
@@ -16,6 +16,11 @@ void handle_sqlite_status(PluginContext *pc, ClientContext *ctx, RequestParams *
 void handle_sqlite_query(PluginContext *pc, ClientContext *ctx, RequestParams *params);
 void handle_sqlite_query_chunked(PluginContext *pc, ClientContext *ctx, RequestParams *params);
 void handle_sqlite(PluginContext *pc, ClientContext *ctx, RequestParams *params);
+
+typedef struct {
+    char query[MAX_QUERY_LEN];
+    CacheFile cache_file;
+} sqlite_result_data_t;
 
 static void (*http_routes[])(PluginContext *, ClientContext *, RequestParams *) = {
     handle_sqlite_status, handle_sqlite_query, handle_sqlite_query_chunked
@@ -166,36 +171,44 @@ unsigned long sdbm_hash(const char *str) {
         hash = c + (hash << 6) + (hash << 16) - hash;
     return hash;
 }
-int get_db_cache_filename(char*buf, int buflen, const char *dir, const char* db, const char* table, const char *query ){
-    return snprintf(buf, buflen, "%s/%s_%s_%08lx.json", dir, db, table, sdbm_hash(query));
+
+int get_db_cache_filename(char*buf, int buflen, const char* db, const char* table, const char *query ){
+    return snprintf(buf, buflen, "%s_%s_%08lx.json", db, table, sdbm_hash(query));
 }
-char g_cache_dir[MAX_PATH];
+
 void handle_sqlite_query(PluginContext *pc, ClientContext *ctx, RequestParams *params) {
     (void)pc; // Unused parameter
     (void)params; // Unused parameter
     (void)ctx; // Unused parameter
-    const char *query = "SELECT lat,lon,elevation,population,name FROM regions LIMIT 10000";
+    sqlite_result_data_t res_data;
+    sqlite_result_data_t *rp = &res_data;
+
+    const char *myquery = "SELECT lat,lon,elevation,population,name FROM regions LIMIT 10000";
+    strcpy(rp->query, myquery);
+
     char cache_filename[255];
     const char* tablename="regions";
-    g_host->config_get_string("CACHE", "dir", g_cache_dir, MAX_PATH, CACHE_DIR);
-    get_db_cache_filename(cache_filename, sizeof(cache_filename), g_cache_dir, "sqlite", tablename, query);
-    if (!g_host->file_exists_recent(cache_filename, CACHE_TIME)){
-        FILE *fp_out = fopen(cache_filename, "w");
-        if (!fp_out) {
+    get_db_cache_filename(cache_filename, sizeof(cache_filename), "sqlite", tablename, rp->query);
+    g_host->cache.file_init(&rp->cache_file, cache_filename);
+    
+    if (!g_host->cache.file_exists_recent(&rp->cache_file)){
+        if (g_host->cache.file_create(&rp->cache_file) < 1){
             g_host->logmsg("Failed to open cache file for writing");
         }else{
             if (NULL == g_sqlite_db) {
                 g_host->logmsg("Failed to open SQLite connection");
                 g_host->http.send_response(ctx->socket_fd, 200, "text/plain", "Failed to open SQLite connection on client thread.");
+                g_host->cache.file_close(&rp->cache_file);
                 return;
             } else {
                 sqlite3_stmt *stmt;
                 int rc;
-                rc= sqlite3_prepare_v2(g_sqlite_db, query, -1, &stmt, NULL);
+                rc= sqlite3_prepare_v2(g_sqlite_db, rp->query, -1, &stmt, NULL);
                 if (rc != SQLITE_OK) {
                     g_host->logmsg("sqlite3_prepare_v2() failed: %s", sqlite3_errmsg(g_sqlite_db));
                     pthread_mutex_unlock(&sqlite_mutex);
                     g_host->http.send_response(ctx->socket_fd, 500, "text/plain", "Query preparation failed");
+                    g_host->cache.file_close(&rp->cache_file);
                     return;
                 }
                 int offset = 0;
@@ -208,6 +221,7 @@ void handle_sqlite_query(PluginContext *pc, ClientContext *ctx, RequestParams *p
                     sqlite3_finalize(stmt);
                     pthread_mutex_unlock(&sqlite_mutex);
                     g_host->http.send_response(ctx->socket_fd, 500, "text/plain", "Memory allocation failed");
+                    g_host->cache.file_close(&rp->cache_file);
                     return;
                 }
                 offset += snprintf(body + offset, body_size - offset, "{\"res\":[\n");
@@ -227,20 +241,21 @@ void handle_sqlite_query(PluginContext *pc, ClientContext *ctx, RequestParams *p
                     }
                     offset += snprintf(body + offset, body_size - offset, "}");
                     if ((double)offset >= body_size * 0.9) {
-                        fwrite(body, 1, offset,fp_out);
+                        g_host->cache.file_write(&rp->cache_file, body, offset);
                         offset=0;
                     }
                 }
                 offset += snprintf(body + offset, body_size - offset, "]}\n");
                 sqlite3_finalize(stmt);
                 pthread_mutex_unlock(&sqlite_mutex);
-                fwrite(body, 1, offset, fp_out);
-                fclose(fp_out);
+                g_host->cache.file_write(&rp->cache_file, body, offset);
+                g_host->cache.file_close(&rp->cache_file);
+
                 free(body);
             }
         }
     }
-    g_host->http.send_file(ctx->socket_fd, "application/json", cache_filename);
+    g_host->http.send_file(ctx->socket_fd, "application/json", rp->cache_file.path);
 }
 void handle_sqlite(PluginContext *pc, ClientContext *ctx, RequestParams *params) {
     (void)pc; // Unused parameter
@@ -261,7 +276,7 @@ void handle_sqlite(PluginContext *pc, ClientContext *ctx, RequestParams *params)
 
 int plugin_register(PluginContext *pc, const PluginHostInterface *host) {
     g_host = host;
-    host->http.register_http_route((void*)pc, plugin_http_get_routes_count, plugin_http_get_routes);
+    host->server.register_http_route((void*)pc, plugin_http_get_routes_count, plugin_http_get_routes);
     host->register_db_queue(pc, "sqlite");
     return PLUGIN_SUCCESS;
 }

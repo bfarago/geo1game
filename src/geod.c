@@ -15,10 +15,9 @@
 #include <sys/time.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <dlfcn.h>
-#include <png.h>
 #include <fcntl.h>
-#include <png.h>
 #include <errno.h>
 #include <ctype.h>
 #include <math.h>
@@ -26,24 +25,83 @@
 #include "plugin.h"
 #include "http.h"
 #include "config.h"
-
+#include "cache.h"
+#include "handlers.h"
 
 typedef struct {
     int interval;
 } plugin_timer_t;
 
-int file_exists(const char *path);
-int file_exists_recent(const char *path, int interval);
-void register_http_routes(PluginContext *ctx, int count, const char *routes[]);
+typedef enum{
+    PROTOCOLID_HTTP,
+    PROTOCOLID_WS,
+    PROTOCOLID_CONTROL
+} ProtocolId_t;
 
-void test_image(ClientContext *ctx, RequestParams *params);
-void handle_status_json(ClientContext *ctx, RequestParams *params);
-void handle_status_html(ClientContext *ctx, RequestParams *params);
-void infopage(ClientContext *ctx, RequestParams *params);
+struct ServerSocket;
+struct ContextServerData;
 
-int http_routes_count = 8;
+typedef struct ContextServerData* (*on_accept_fn_t)(struct ServerSocket *ss, int client_fd, struct sockaddr_in *addr);
+typedef void* (*process_fn_t)(void *arg);
+
+typedef struct ServerProtocol{
+    ProtocolId_t id;
+    const char *label;
+    on_accept_fn_t on_accept;
+    const process_fn_t on_process;
+} ServerProtocol;
+
+typedef struct ContextServerData {
+    struct ContextServerData *next;
+    pthread_t thread_id;
+    ClientContext cc;
+}ContextServerData;
+
+typedef struct StatData{
+    unsigned short actual5s;  //jumping
+    unsigned short a_min5s;
+    unsigned short a_max5s;
+    unsigned int a_sum5s;     //aggregated
+
+    unsigned short min5sm;
+    unsigned short max5sm;
+    unsigned int avg5sm;    
+    unsigned int value_m;
+} StatData;
+
+typedef struct ServerSocket{
+    int fd;
+    int port;
+    int backlog;
+    const char *label;
+    const ServerProtocol *protocol;
+    struct sockaddr_in addr;
+    char server_ip[32];
+    int opt;
+    StatData stat_alive;
+    StatData stat_finished;
+    StatData stat_failed;
+    StatData stat_exectime;
+    double execution_time_5s;
+    ContextServerData *first_ctx_data;
+} ServerSocket;
+
+
+#define MAX_SERVER_SOCKETS 4
+ServerSocket g_server_sockets[MAX_SERVER_SOCKETS];
+int g_server_socket_count = 0;
+// void register_http_routes(PluginContext *ctx, int count, const char *routes[]);
+
+ContextServerData* onAcceptHttp(ServerSocket* ss, int client_fd, struct sockaddr_in *addr);
+ContextServerData* onAcceptWs(ServerSocket* ss, int client_fd, struct sockaddr_in *addr);
+ContextServerData* onAcceptControl(ServerSocket* ss, int client_fd, struct sockaddr_in *addr);
+//void* onProcessHttp(ClientContext *ctx);
+void* onProcessWs(void *arg);
+void* onProcessControl(void *arg);
+
+int http_routes_count = 4;
 const HttpRouteRule http_routes[] = {
-    {"/test", test_image},
+    {"/testimage", test_image},
     {"/status.html", handle_status_html},
     {"/status.json", handle_status_json},
     {"/", infopage},
@@ -67,15 +125,19 @@ typedef struct {
 
 housekeeper_t g_housekeeper;
 
+
 int g_PluginCount = 0;
 PluginContext g_Plugins[MAX_PLUGIN];
-char g_cache_dir[MAX_PATH];
-int g_http_port;
+
+int g_port_http;
+int g_port_ws;
+int g_port_control;
 int g_debug_msg_enabled=0;
 
 void sigusr1_handler(int signum) {
     (void)signum;
     reload_plugins = 1;
+    g_debug_msg_enabled= config_get_int("LOG", "debug_msg_enabled", 0);
 }
 void sigint_handler(int signum) {
     (void)signum;
@@ -84,6 +146,28 @@ void sigint_handler(int signum) {
 void sigterm_handler(int signum) {
     (void)signum;
     keep_running = 0;
+}
+void sigchld_handler(int sig) {
+    (void)sig;
+    // tries to help the kernel, to free up zombie processes, the number of zombies are
+    // a practical number, this much sys calls will trigger the kernel to lett a z process
+    // to be freed up. We expect not more than this amout of kept zombie processes.
+    // the timeout is one secount, so after max count number of calls, the function exits
+    // anyway. Non blocking waitpid() is used to avoid blocking the whole program.
+    int count = 32; // theoreticaly this is the expected zombie count max.
+    time_t start = time(NULL);
+    while (count-- > 0 && waitpid(-1, NULL, WNOHANG) > 0)
+    {
+        if (time(NULL) - start > 1) break; // max 1 másodperc
+    };
+}
+
+void setup_sigchld_handler() {
+    struct sigaction sa;
+    sa.sa_handler = sigchld_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+    sigaction(SIGCHLD, &sa, NULL);
 }
 void write_pidfile_or_exit() {
     FILE *fp = fopen(GEOD_PIDFILE, "r");
@@ -305,17 +389,46 @@ void image_write_row(PluginContext *pc, Image *image, void *row){
         pc->image.write_row(pc, image, row);
     }
 }
-void register_http_routes(PluginContext *ctx, int count, const char *routes[]) {
-    ctx->http_route_count = count;
-    ctx->http_routes = malloc(count * sizeof(HttpRouteRule));
-    if (!ctx->http_routes) {
+void register_http_routes(PluginContext *pc, int count, const char *routes[]) {
+    HttpCapabilities *cap = &pc->http_caps;
+    cap->http_route_count = count;
+    cap->http_routes = malloc(count * sizeof(HttpRouteRule));
+    if (!cap->http_routes) {
         logmsg("Failed to allocate memory for HTTP routes");
         return;
     }
     for (int i = 0; i < count; i++) {
         int len = strlen(routes[i]);
-        ctx->http_routes[i] = malloc(len + 1);
-        snprintf(ctx->http_routes[i], len + 1, "%s", routes[i]); // it could be also /plugin/pluginnname, etc...
+        cap->http_routes[i] = malloc(len + 1);
+        snprintf(cap->http_routes[i], len + 1, "%s", routes[i]); // it could be also /plugin/pluginnname, etc...
+    }
+}
+void register_ws_routes(PluginContext *pc, int count, const char *routes[]) {
+    WsCapabilities *cap = &pc->ws_caps;
+    cap->ws_route_count = count;
+    cap->ws_routes = malloc(count * sizeof(WsRouteRule));
+    if (!cap->ws_routes) {
+        logmsg("Failed to allocate memory for HTTP routes");
+        return;
+    }
+    for (int i = 0; i < count; i++) {
+        int len = strlen(routes[i]);
+        cap->ws_routes[i] = malloc(len + 1);
+        snprintf(cap->ws_routes[i], len + 1, "%s", routes[i]); // it could be also /plugin/pluginnname, etc...
+    }
+}
+void register_control_routes(PluginContext *ctx, int count, const char *routes[]) {
+    ControlCapabilities *cap = &ctx->control_caps;
+    cap->route_count = count;
+    cap->routes = malloc(count * sizeof(ControlRouteRule));
+    if (!cap->routes) {
+        logmsg("Failed to allocate memory for CONTROL routes");
+        return;
+    }
+    for (int i = 0; i < count; i++) {
+        int len = strlen(routes[i]);
+        cap->routes[i] = malloc(len + 1);
+        snprintf(cap->routes[i], len + 1, "%s", routes[i]); // it could be also /plugin/pluginnname, etc...
     }
 }
 void register_db_queue(PluginContext *ctx, const char *db){
@@ -335,6 +448,16 @@ PluginContext* get_plugin_context(const char *name){
     }
     return NULL;
 }
+void ws_hostside_handshake(PluginContext *pc, WsRequestParams* wsp, const char *msg){
+    //placeholder function, just an exaple for host interface
+    (void)msg;
+    (void)wsp;
+    int wspluginid = pc->id;
+    if (0==plugin_start(wspluginid)){
+            // plugin dinamyc functions are available...
+        plugin_stop(wspluginid);
+    }
+}
 PluginHostInterface g_plugin_host = {
     .get_plugin_context = get_plugin_context,
     .start_timer = (void*)plugin_start_timer,
@@ -347,13 +470,19 @@ PluginHostInterface g_plugin_host = {
     .config_get_string = config_get_string,
     .config_get_int = config_get_int,
     .register_db_queue = register_db_queue,
-    .http = {
+    .server = {
         .register_http_route = register_http_routes,
+        .register_control_route = register_control_routes
+    },
+    .http = {
         .send_response = send_response,
         .send_file = send_file,
         .send_chunk_head = send_chunk_head,
         .send_chunk_end = send_chunk_end,
         .send_chunks = send_chunks
+    },
+    .ws = {
+        .handshake = ws_hostside_handshake,
     },
     .map = {
         .start_map_context= start_map_context,
@@ -367,6 +496,16 @@ PluginHostInterface g_plugin_host = {
         .destroy = image_destroy,
         .get_buffer = image_get_buffer,
         .write_row = image_write_row
+    },
+    .cache = {
+        .get_dir = cache_get_dir,
+        .file_init = cache_file_init,
+        .file_create = cache_file_create,
+        .file_close = cache_file_close,
+        .file_remove = cache_file_remove,
+        .file_rename = cache_file_rename,
+        .file_exists_recent = cache_file_exists_recent,
+        .file_write = cache_file_write,
     }
 };
 
@@ -410,6 +549,8 @@ int plugin_load(const char *name, int id){
         dlclose(pc->handle);
         return -1;
     }
+    // Resolve generic plugin event handler (optional)
+    pc->plugin_event = (plugin_event_handler_t)dlsym(pc->handle, "plugin_event");
     if (pc->plugin_init(pc, &g_plugin_host)) {
         logmsg("Failed to initialize plugin: %s", filename);
         dlclose(pc->handle);
@@ -420,8 +561,17 @@ int plugin_load(const char *name, int id){
 }
 
 int plugin_unload(int id){
-    PluginContext *pc=&g_Plugins[id];
+    PluginContext *pc = &g_Plugins[id];
     if (pc->handle) {
+        // Call plugin_event(PLUGIN_EVENT_STANDBY) if present before finish
+        if (pc->plugin_event) {
+            PluginEventContext evctx = {0};
+            int ev = pc->plugin_event(pc, PLUGIN_EVENT_STANDBY, &evctx);
+            if (ev != 0) {
+                debugmsg("Plugin %s requested delay for standby", pc->name);
+                return -1;
+            }
+        }
         if (pc->plugin_finish) {
             pc->plugin_finish(pc);
         }
@@ -431,7 +581,8 @@ int plugin_unload(int id){
         pc->plugin_finish = NULL;
         pc->plugin_register = NULL;
         pc->http.request_handler = NULL;
-    }else{
+        pc->plugin_event = NULL;
+    } else {
         logmsg("Plugin not loaded");
         return -1;
     }
@@ -499,7 +650,7 @@ void plugin_scan_and_register() {
 
         if (!known && g_PluginCount < MAX_PLUGIN) {
             PluginContext *pc = &g_Plugins[g_PluginCount];
-            pc->http_route_count=0;
+            pc->http_caps.http_route_count=0;
             int res = plugin_load(entry->d_name, g_PluginCount);
             strncpy(pc->name, entry->d_name, sizeof(pc->name) - 1);
             pc->id = g_PluginCount;
@@ -516,10 +667,14 @@ void plugin_scan_and_register() {
             g_PluginCount++;
         }
     }
-
     closedir(dir);
 }
-
+int housekeeper_is_running(void){
+    return g_housekeeper.running;
+}
+int housekeeper_is_mapgen_loaded(void){
+    return g_housekeeper.mapgen_loaded;
+}
 void housekeeper_plugins(time_t now ){
     for (int i = 0; i < g_PluginCount; i++) {
         PluginContext *pc = &g_Plugins[i];
@@ -550,12 +705,100 @@ void housekeeper_mapgen(time_t now ){
         }
     }
 }
+void logClientContext(ClientContext *cc){
+    logmsg("Client: ip:%s fd:%d", cc->client_ip, cc->socket_fd);
+}
+
+#define SD_MAX_COUNT_5S (12) // 60 div 5, one minute elapsed
+unsigned short g_counter5s=0;
+void stat_data_add(StatData *sd, int value){
+    sd->actual5s = value;
+    if (sd->a_max5s < value) sd->a_max5s = value;
+    if (sd->a_min5s > value) sd->a_min5s = value;
+    sd->a_sum5s += value;
+    if (g_counter5s >= SD_MAX_COUNT_5S){
+        sd->value_m = sd->a_sum5s;
+        sd->min5sm = sd->a_min5s;
+        sd->max5sm = sd->a_max5s;
+        sd->avg5sm = sd->a_sum5s / g_counter5s;
+        sd->a_max5s = 0;
+        sd->a_min5s = 0xffff;
+        sd->a_sum5s = 0;
+    }
+}
+
+void housekeeper_server_clients(time_t now ){
+    (void)now; // suppress unused parameter warning (now is passed to housekeeper_server_clients 
+    #if (0)
+    if (g_debug_msg_enabled){
+        for(int i=0; i<g_server_socket_count; i++) {
+            ServerSocket *ss = &g_server_sockets[i];
+            ContextServerData *csd = ss->first_ctx_data;
+            logmsg("Server: %s ip:%s:%d fd:%d",ss->protocol->label, ss->server_ip, ss->port, ss->fd);
+            int limit =10;
+            while (csd){
+                ClientContext *cc = &csd->cc;
+                logClientContext(cc);
+                if (--limit < 0) break;
+                csd = csd->next;
+            }
+        }
+    }
+    #endif
+    //
+    for(int i=0; i<g_server_socket_count; i++) {
+        ServerSocket *ss = &g_server_sockets[i];
+        int limit =300;
+        int count_alive = 0;
+        int count_finished = 0;
+        int count_failed = 0;
+        ContextServerData **csd_prev = &ss->first_ctx_data;
+        while (*csd_prev){
+            ContextServerData *csd = *csd_prev;
+            if (csd->cc.result_status == CTX_ERROR){
+                count_failed++;
+            }
+
+            if (csd->cc.socket_fd<0){
+                ss->execution_time_5s+= csd->cc.elapsed_time;
+                *csd_prev = csd->next; // decouple
+                free(csd);
+                count_finished++;
+                continue;
+            }
+            count_alive++;
+            if (--limit < 0) break;
+            csd_prev= &csd->next;
+            if (csd_prev == NULL) break;
+
+        }
+        stat_data_add(&ss->stat_alive, count_alive);
+        stat_data_add(&ss->stat_finished, count_finished);
+        stat_data_add(&ss->stat_failed, count_failed);
+        stat_data_add(&ss->stat_exectime, ss->execution_time_5s*1000.0);
+        if (g_counter5s >= SD_MAX_COUNT_5S){
+            logmsg("%s Server %s:%d Clients stats: (alive, ok, failed, exec, cpu) min (%d, %d, %d, %dms, %0.2f%%) max (%d, %d, %d, %dms, %0.2f%%)",
+            ss->protocol->label, ss->server_ip, ss->port,
+            ss->stat_alive.min5sm, ss->stat_finished.min5sm, ss->stat_failed.min5sm, ss->stat_exectime.min5sm, ss->stat_exectime.min5sm/50.0,
+            ss->stat_alive.max5sm, ss->stat_finished.max5sm, ss->stat_failed.max5sm, ss->stat_exectime.max5sm, ss->stat_exectime.max5sm/50.0);
+            ss->execution_time_5s = 0.0;
+        }
+    }
+    if (g_counter5s >= SD_MAX_COUNT_5S){
+        g_counter5s = 0;
+    }else{
+        g_counter5s++;
+    }
+    
+}
+
 void *housekeeper_thread(void *arg) {
     (void)arg; // suppress unused parameter warning
     while (g_housekeeper.running) {
         time_t now = time(NULL);
         housekeeper_plugins(now);
         housekeeper_mapgen(now);
+        housekeeper_server_clients(now);
         for (int i = 0; i<5; i++) {
             if (g_housekeeper.running) {
                 sleep(1);
@@ -563,7 +806,6 @@ void *housekeeper_thread(void *arg) {
                 break;
             }
         }
-
     }
     return NULL;
 }
@@ -594,141 +836,103 @@ int file_exists_recent(const char *filename, int max_age_seconds) {
     time_t now = time(NULL);
     return (now - st.st_mtime) < max_age_seconds;
 }
+void close_ClientContext(ClientContext *ctx) {
+    close(ctx->socket_fd);
+    ctx->socket_fd = -1;
+    clock_gettime(CLOCK_MONOTONIC, &ctx->end_time);
+    ctx->elapsed_time = (ctx->end_time.tv_sec - ctx->start_time.tv_sec) +
+                          (ctx->end_time.tv_nsec - ctx->start_time.tv_nsec) / 1e9;
 
-void handle_status_html(ClientContext *ctx, RequestParams *params) {
-    const char *html_head = "<html><body><h1>GeoD Status</h1><p>Server is running.</p>";
-    const char *html_end =  "</body></html>";
-    char html[4096];
-    int offset = 0;
-    offset += snprintf(html + offset, sizeof(html) - offset, "%s", html_head);
-    offset += snprintf(html + offset, sizeof(html) - offset, "<p>Client IP: %s</p>", ctx->client_ip);
-    offset += snprintf(html + offset, sizeof(html) - offset, "<p>Request Path: %s</p>", params->path);
-    offset += snprintf(html + offset, sizeof(html) - offset, "<p>Request Params:</p><ul>");
-    for (int i = 0; i < ctx->request.query_count; i++) {
-        offset += snprintf(html + offset, sizeof(html) - offset, "<li>%s: %s</li>", ctx->request.query[i].key, ctx->request.query[i].value);
-    }
-    offset += snprintf(html + offset, sizeof(html) - offset, "</ul>");
-    offset += snprintf(html + offset, sizeof(html) - offset, "<p>Request Headers:</p><ul>");
-    for (int i = 0; i < ctx->request.header_count; i++) {
-        offset += snprintf(html + offset, sizeof(html) - offset, "<li>%s: %s</li>", ctx->request.headers[i].key, ctx->request.headers[i].value);
-    }
-    offset += snprintf(html + offset, sizeof(html) - offset, "</ul>");
-    offset += snprintf(html + offset, sizeof(html) - offset, "<p>Request Method: %s</p>", ctx->request.method);
-    offset += snprintf(html + offset, sizeof(html) - offset, "<p>Plugins Loaded:</p><ul>");
-    for (int i = 0; i < g_PluginCount; i++) {
-        PluginContext *pc = &g_Plugins[i];
-        if (pc->handle) {
-            offset += snprintf(html + offset, sizeof(html) - offset, "<li>%d: %s  (used:%d) ", pc->id, pc->name, pc->used_count );
-            for (int j = 0; j < pc->http_route_count; j++) {
-                offset += snprintf(html + offset, sizeof(html) - offset, "[<a href=\"%s\">%s</a>] ", pc->http_routes[j], pc->http_routes[j] );
-            }
-            offset += snprintf(html + offset, sizeof(html) - offset, "</li>");
-        }
-    }
-    offset += snprintf(html + offset, sizeof(html) - offset, "</ul>");
-    offset += snprintf(html + offset, sizeof(html) - offset, "<p>Plugins not loaded:</p><ul>");
-    for (int i = 0; i < g_PluginCount; i++) {
-        PluginContext *pc = &g_Plugins[i];
-        if (!pc->handle) {
-            offset += snprintf(html + offset, sizeof(html) - offset, "<li>%d: %s ", pc->id, pc->name );
-            for (int j = 0; j < pc->http_route_count; j++) {
-                offset += snprintf(html + offset, sizeof(html) - offset, "[<a href=\"%s\">%s</a>] ", pc->http_routes[j], pc->http_routes[j] );
-            }
-            offset += snprintf(html + offset, sizeof(html) - offset, "</li>");
-        }
-    }
-    offset += snprintf(html + offset, sizeof(html) - offset, "</ul>");
-    offset += snprintf(html + offset, sizeof(html) - offset, "<p>Mapgen Loaded: %s</p>", g_housekeeper.mapgen_loaded ? "Yes" : "No");
+}
+
+void *onProcessControl(void *arg) {
+    ClientContext *ctx = (ClientContext *)arg;
     
-    offset += snprintf(html + offset, sizeof(html) - offset, "%s", html_end);
-    send_response(ctx->socket_fd, 200, "text/html", html);
-    logmsg("%s status_html request", ctx->client_ip);
-}
-
-void handle_status_json(ClientContext *ctx, RequestParams *params) {
-    (void)params; // suppress unused parameter warning
-    const char *json = "{\"status\":\"running\"}";
-    send_response(ctx->socket_fd, 200, "application/json", json);
-    //logmsg("%s status_json request", ctx->client_ip);
-}
-
-void infopage(ClientContext *ctx, RequestParams *params) {
-    (void)params; // suppress unused parameter warning
-    dprintf(ctx->socket_fd,
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/html\r\n\r\n"
-        "<!DOCTYPE html>"
-        "<html><head><title>GeoD</title>"
-        "<style>body { background-color: black; color: white; text-align: center; }</style>"
-        "</head><body>"
-        "<h1>GeoD Preview</h1>"
-        "<p><img src=\"clouds?width=720&height=360\" alt=\"Clouds\"></p>"
-        "<p><img src=\"biome?width=720&height=360\" alt=\"Biome\"></p>"
-        "<p><img src=\"elevation?width=720&height=360\" alt=\"Elevation\"></p>"
-        "</body></html>"
-    );
-}
-void test_image(ClientContext *ctx, RequestParams *params) {
-    char filename[MAX_PATH];
-    snprintf(filename, sizeof(filename), "%s/test_lat%.2f_lon%.2f_%dx%d.png",
-        g_cache_dir,
-        params->lat_min, params->lon_min, 
-        params->width, params->height);
-    if (!file_exists_recent(filename, CACHE_TIME)) {
-        logmsg("Generating new biome PNG: %s", filename);
-        if (start_map_context()) {
-            logmsg("Failed to start map context");
-            send_response(ctx->socket_fd, 500, "text/plain", "Failed to start map context\n");
-            return;
-        }
-        PluginContext *pcimg= get_plugin_context("image");
-        if (pcimg){
-            image_context_start(pcimg);
-            Image img;
-            if (image_create(pcimg, &img, "test.png", 320, 200, ImageBackend_Png, ImageFormat_RGB, ImageBuffer_AoS)){
-                for (unsigned int y = 0; y < img.height; y++) {
-                    png_bytep row = malloc(3 * img.width);
-                    float lat = params->lat_max - ((params->lat_max - params->lat_min) / img.height) * y;
-                    for (unsigned int x = 0; x < img.width; x++) {
-                        float lon = params->lon_min + ((params->lon_max - params->lon_min) / img.width) * x;
-                        TerrainInfo info = map_context.get_info(lat, lon);
-                        row[x*3 + 0] = info.r;
-                        row[x*3 + 1] = info.g;
-                        row[x*3 + 2] = info.b;
+    int keep_processing = 1;
+    while (keep_processing && keep_running) {
+        char line[BUF_SIZE];
+        // read lines from client
+        ssize_t n = read(ctx->socket_fd, line, sizeof(line)-1);
+        if (n > 0) {
+            line[n] = '\0';
+            dprintf(ctx->socket_fd, "You said: %s", line);  // <- visszaküldés
+            char *cmd = strtok(line, " \r\n");
+            if (cmd) {
+                if (strcasecmp(line, "quit") == 0) {
+                    dprintf(ctx->socket_fd, "Goodbye!\n");
+                    keep_processing = 0;
+                }else if (strcasecmp(line, "reload") == 0) {
+                    dprintf(ctx->socket_fd, "Plugins will be reloaded\n");
+                    reload_plugins=1;
+                }else if (strcasecmp(line, "stop") == 0) {
+                    dprintf(ctx->socket_fd, "Server will be stopped\n");
+                    keep_running = 0;
+                }else if (strcasecmp(line, "stat") == 0) {
+                    char *arg = strtok(NULL, " \r\n");
+                    if (arg) {
+                        dprintf(ctx->socket_fd, "%s staistics\n", arg);
+                    }else{
+                        dprintf(ctx->socket_fd, "staistics\n");
                     }
-                    image_write_row(pcimg, &img, row); //png_write_row(img.png_ptr, row);
-                    free(row);
+                }else{
+                    for (int id = 0; id < g_PluginCount; id++) {
+                        PluginContext *pctx = &g_Plugins[id];
+                        int n = pctx->control_caps.route_count;
+                        if (n){
+                            for (int j = 0; j < n; j++) {
+                                ControlCapabilities *cap = &pctx->control_caps;
+                                char *route = cap->routes[j];
+                                if (strcasecmp(route, cmd) == 0) {
+                                    char *arg = strtok(NULL, " \r\n");
+                                    int argc =1;
+                                    char * argv[3]={arg, NULL,NULL};
+                                    if (!plugin_start(id)){
+                                        pctx->control.request_handler(pctx, ctx, cmd, argc, argv);
+                                    }else{
+                                        logmsg("itt");
+                                    }
+                                    plugin_stop(id);
+                                    
+                                    break;
+                                }else{
+                                    logmsg("ott");
+                                }
+                            }
+                        }
+                    }
                 }
-                image_destroy(pcimg, &img);  // PngImage_finish(&img);
-                logmsg("Test PNG generated: %s", filename);
             }
-            image_context_stop(pcimg);
         }
-        stop_map_context();
-    } else {
-        logmsg("Using cached test PNG: %s", filename);
+        sleep(1);
     }
-    send_file(ctx->socket_fd, "image/png", filename);
+    close_ClientContext(ctx);
+    return NULL;
 }
-
+void *onProcessWs(void *arg){
+    ClientContext *ctx = (ClientContext *)arg;
+    close_ClientContext(ctx);
+    return NULL;
+}
 void *http_handle_client(void *arg) {
     ClientContext *ctx = (ClientContext *)arg;
-    int len = read(ctx->socket_fd, ctx->request_buffer, BUF_SIZE - 1);
-    if (len <= 0) {
-        close(ctx->socket_fd);
-        free(ctx);
-        return NULL;
+    ctx->result_status = CTX_RUNNING;
+    int total_len = 0;
+    while (total_len < BUF_SIZE - 1) {
+        int bytes = read(ctx->socket_fd, ctx->request_buffer + total_len, BUF_SIZE - 1 - total_len);
+        if (bytes <= 0) {
+            errormsg("Error reading request from client");
+            ctx->result_status = CTX_ERROR;
+            close_ClientContext(ctx);
+            return NULL;
+        }
+        total_len += bytes;
+        ctx->request_buffer[total_len] = '\0';
+        if (strstr(ctx->request_buffer, "\r\n\r\n")) {
+            break;
+        }
     }
-    ctx->request_buffer[len] = '\0';
+    ctx->request_buffer_len = total_len;
     http_parse_request(ctx, &ctx->request);
-    char *xfor = strcasestr(ctx->request_buffer, "x-forwarded-for:");
-    if (xfor) {
-        xfor += strlen("x-forwarded-for:");
-        while (*xfor == ' ') xfor++;
-        char *end = strchr(xfor, '\r');
-        if (end) *end = '\0';
-        strncpy(ctx->client_ip, xfor, sizeof(ctx->client_ip) - 1);
-    }
 
     RequestParams params;
     parse_request_path_and_params(ctx->request_buffer, &params);
@@ -736,27 +940,28 @@ void *http_handle_client(void *arg) {
     for (int i = 0; i < http_routes_count; i++) {
         if (strcmp(http_routes[i].path, params.path) == 0) {
             http_routes[i].handler(ctx, &params);
-            close(ctx->socket_fd);
-            free(ctx);
+            if (ctx->result_status == CTX_RUNNING) ctx->result_status = CTX_FINISHED_OK;
+            close_ClientContext(ctx);
             return NULL;
         }
     }
     for (int i=0; i<g_PluginCount; i++) {
         PluginContext *pc=&g_Plugins[i];
-        if (pc->http_route_count == 0) continue;
-        for (int j=0; j<pc->http_route_count; j++) {
-            if (strcmp(pc->http_routes[j], params.path) == 0) {
+        if (pc->http_caps.http_route_count == 0) continue;
+        for (int j=0; j<pc->http_caps.http_route_count; j++) {
+            if (strcmp(pc->http_caps.http_routes[j], params.path) == 0) {
                 if (!plugin_start(i)){
                     pc->http.request_handler(pc, ctx, &params);
                     plugin_stop(i);
-                    close(ctx->socket_fd);
-                    free(ctx);
+                    if (ctx->result_status == CTX_RUNNING) ctx->result_status = CTX_FINISHED_OK;
+                    close_ClientContext(ctx);
+                    // logmsg("Plugin %s closed the TCP socket", pc->name);
                     return NULL;
                 } else {
                     errormsg("Plugin %s is busy", pc->name);
                     dprintf(ctx->socket_fd, "HTTP/1.1 503 Service Unavailable\r\n\r\n");
-                    close(ctx->socket_fd);
-                    free(ctx);
+                    ctx->result_status = CTX_ERROR;
+                    close_ClientContext(ctx);
                     return NULL;
                 }
             }
@@ -764,71 +969,122 @@ void *http_handle_client(void *arg) {
     }
     // Handle unknown paths
     dprintf(ctx->socket_fd, "HTTP/1.1 404 Not Found\r\n\r\n");
-    close(ctx->socket_fd);
-    free(ctx);
+    ctx->result_status = CTX_ERROR;
+    close_ClientContext(ctx);
     return NULL;
 }
 
-// Initialize cache directory: create if missing, cleanup old cache files
-void cache_init(const char *path) {
-    struct stat st;
-    if (stat(path, &st) != 0) {
-        if (mkdir(path, 0755) != 0) {
-            errormsg("Failed to create cache directory: %s", path);
-            return;
-        } else {
-            logmsg("Created cache directory: %s", path);
-            return;
-        }
-    }
+void logstartup(){
+    char cwd[MAX_PATH];
+    getcwd(cwd, sizeof(cwd));
+    logmsg("GeoD starting in working dir %s", cwd);
+}
 
-    DIR *dir = opendir(path);
-    if (!dir) {
-        errormsg("Cannot open cache directory: %s", path);
-        return;
+
+const ServerProtocol g_server_protocols[3] = {
+   [PROTOCOLID_HTTP] =  {
+        .id = PROTOCOLID_HTTP,
+        .label = "HTTP",
+        .on_accept = onAcceptHttp,
+        .on_process = http_handle_client
+    },
+    [PROTOCOLID_WS] = {
+        .id = PROTOCOLID_WS,
+        .label = "WS",
+        .on_accept = onAcceptWs,
+        .on_process = onProcessWs
+    },
+    [PROTOCOLID_CONTROL] = {
+        .id = PROTOCOLID_CONTROL,
+        .label = "CONTROL",
+        .on_accept = onAcceptControl,
+        .on_process = onProcessControl
     }
-    if (config_get_int("CACHE", "cleanup_on_start",1)){
-        struct dirent *entry;
-        char filepath[MAX_PATH];
-        int count_deleted = 0;
-        int count_failed = 0;
-        int count_others = 0;
-        while ((entry = readdir(dir)) != NULL) {
-            if (entry->d_type != DT_REG) continue;
-            const char *name = entry->d_name;
-            if (strstr(name, ".png") || strstr(name, ".png_") || strstr(name, ".json") || strstr(name, ".html")) {
-                snprintf(filepath, sizeof(filepath), "%s/%s", path, name);
-                if (unlink(filepath) == 0) {
-                    count_deleted++;
-                    // logmsg("Deleted cache file: %s", filepath);
-                } else {
-                    count_failed++;
-                    debugmsg("Failed to delete file: %s", filepath);
-                }
-            }else {
-                count_others++;
-            }
-        }
-        if (count_deleted + count_failed + count_others > 0) {
-            logmsg("Cleanup on start: Deleted %d cache files, failed to delete %d cache files, and %d other files", count_deleted, count_failed, count_others);
-        }
+};
+
+int register_server_socket(int port, const ServerProtocol const *proto, int backlog) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    fcntl(fd, F_SETFL, O_NONBLOCK);
+    int opt = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    ServerSocket *ss = &g_server_sockets[g_server_socket_count];
+    *ss = (ServerSocket){
+        .fd = fd, .port = port, .protocol = proto, .addr = {0},
+        .opt = 1, .backlog = backlog
+    };
+    ss->addr.sin_family = AF_INET;
+    ss->addr.sin_port = htons(port);
+    ss->addr.sin_addr.s_addr = INADDR_ANY;
+    config_get_string(proto->label, "server_ip",ss->server_ip,sizeof(ss->server_ip), "127.0.0.1");
+    if (!inet_aton(ss->server_ip, &ss->addr.sin_addr)) {
+        errormsg("Invalid IP address in config: %s", ss->server_ip);
     }
-    closedir(dir);
+    return g_server_socket_count++;
+}
+int server_socket_bind_listen(ServerSocket *ss){
+    if (bind(ss->fd, (struct sockaddr *)&ss->addr, sizeof(ss->addr)) < 0) {
+        perror("bind");
+        errormsg("Failed to bind the socket on port %d", ss->port);
+        return -1;
+    }
+    if (listen(ss->fd, ss->backlog) < 0) {
+        perror("listen");
+        errormsg("Failed to bind the socket on port %d", ss->port);
+        return -2;
+    }
+    debugmsg("Listening on port %d at %s by protocol %s", ss->port, inet_ntoa(ss->addr.sin_addr), ss->protocol->label);
+    return 0;
+}
+
+
+ContextServerData* onAcceptBasic(ServerSocket *ss, int fd, struct sockaddr_in *addr) {
+    if (!ss) return NULL;
+    debugmsg("Accepted connection on port %d from %s by protocol %s", ss->port, inet_ntoa(addr->sin_addr), ss->protocol->label);
+    // context may depends on the protocol...
+    ContextServerData *csd= malloc(sizeof(ContextServerData));
+    if (!csd) return NULL;
+    csd->next = NULL;
+    ClientContext *ctx = &csd->cc;
+    ctx->socket_fd = fd;
+    inet_ntop(AF_INET,  &(addr->sin_addr), ctx->client_ip, sizeof(ctx->client_ip));
+
+    ContextServerData **prev = &ss->first_ctx_data;
+    while (*prev) {
+        prev = &(*prev)->next;
+    }
+    *prev = csd; // this is the last one now.
+    return csd;
+}
+ContextServerData* onAcceptHttp(ServerSocket *ss, int fd, struct sockaddr_in *addr) {
+    return onAcceptBasic(ss, fd, addr);
+}
+ContextServerData* onAcceptWs(ServerSocket *ss,int fd, struct sockaddr_in *addr) {
+    return onAcceptBasic(ss, fd, addr);
+}
+ContextServerData* onAcceptControl(ServerSocket *ss, int fd, struct sockaddr_in *addr) {
+    return onAcceptBasic(ss, fd, addr);
+}
+
+void init_startup_server_sockets() {
+    g_port_http = config_get_int("HTTP", "port", 8008);
+    g_port_ws = config_get_int("WS", "port", 8010);
+    g_port_control = config_get_int("CONTROL", "port", 8011);
+    register_server_socket(g_port_http, &g_server_protocols[PROTOCOLID_HTTP], 16);
+    register_server_socket(g_port_ws, &g_server_protocols[PROTOCOLID_WS], 16);
+    register_server_socket(g_port_control, &g_server_protocols[PROTOCOLID_CONTROL], 4);
+
 }
 
 int main() {
     signal(SIGINT, sigint_handler);
     signal(SIGTERM, sigterm_handler);
     signal(SIGUSR1, sigusr1_handler);
+    setup_sigchld_handler();
 
-    char cwd[MAX_PATH];
-    getcwd(cwd, sizeof(cwd));
-    config_get_string("CACHE", "dir", g_cache_dir, MAX_PATH, CACHE_DIR);
-    g_http_port = config_get_int("HTTP", "port", PORT);
     g_debug_msg_enabled= config_get_int("LOG", "debug_msg_enabled", 0);
 
-    logmsg("GeoD starting on port %d in working dir %s", g_http_port, cwd);
-    cache_init(g_cache_dir);
+    logstartup();
+    cachesystem_init();
     
     atexit(remove_pidfile);
     write_pidfile_or_exit();
@@ -836,49 +1092,61 @@ int main() {
 
     plugin_scan_and_register();
     start_housekeeper();
+    init_startup_server_sockets();
 
-    int server_socket = socket(AF_INET, SOCK_STREAM, 0);
-    struct sockaddr_in server_addr;
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(g_http_port);
-    server_addr.sin_addr.s_addr = INADDR_ANY;
-    int opt = 1;
-    setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-    if (bind(server_socket, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
-        perror("bind");
-        exit(1);
+    for (int i = 0; i < g_server_socket_count; i++) {
+        if (server_socket_bind_listen(&g_server_sockets[i]) < 0) {
+            exit(1);
+        }
     }
-    if (listen(server_socket, 8) < 0) {
-        perror("listen");
-        exit(1);
-    }
-    fcntl(server_socket, F_SETFL, O_NONBLOCK);
 
     while (keep_running) {
         fd_set fds;
         FD_ZERO(&fds);
-        FD_SET(server_socket, &fds);
+        int max_fd = 0;
+        for (int i = 0; i < g_server_socket_count; i++) {
+            FD_SET(g_server_sockets[i].fd, &fds);
+            if (g_server_sockets[i].fd > max_fd) max_fd = g_server_sockets[i].fd;
+        }
 
         struct timeval timeout = {1, 0}; // 1 sec
-        int ret = select(server_socket + 1, &fds, NULL, NULL, &timeout);
+        int ret = select(max_fd + 1, &fds, NULL, NULL, &timeout);
 
-        if (ret > 0 && FD_ISSET(server_socket, &fds)) {
-            struct sockaddr_in client_addr;
-            socklen_t addrlen = sizeof(client_addr);
-            int client_fd = accept(server_socket, (struct sockaddr *)&client_addr, &addrlen);
-            if (client_fd < 0) continue;
-            ClientContext *ctx = malloc(sizeof(ClientContext));
-            ctx->socket_fd = client_fd;
-            inet_ntop(AF_INET, &client_addr.sin_addr, ctx->client_ip, sizeof(ctx->client_ip));
-            pthread_t thread_id;
-            pthread_create(&thread_id, NULL, http_handle_client, ctx);
-            pthread_detach(thread_id);
+        if (ret > 0){
+            for (int i = 0; i < g_server_socket_count; i++) {
+                ServerSocket *ss = &g_server_sockets[i];
+                const ServerProtocol *sp = ss->protocol;
+                if (FD_ISSET(ss->fd, &fds)) {
+                    struct sockaddr_in client_addr;
+                    socklen_t addrlen = sizeof(client_addr);
+                    int client_fd = accept(ss->fd, (struct sockaddr *)&client_addr, &addrlen);
+                    if (client_fd < 0) {
+                        logmsg("accept error: %s", strerror(errno));
+                        continue;
+                    }
+                    
+                    ContextServerData *csd = sp->on_accept(ss, client_fd, &client_addr);
+                    if (csd){
+                        ClientContext *ctx = &csd->cc;
+                        clock_gettime(CLOCK_MONOTONIC, &ctx->start_time);
+                        pthread_create(&csd->thread_id, NULL, sp->on_process, ctx);
+                        pthread_detach(csd->thread_id);
+                    }else{
+                        // rejected by the protocol specific on_accept function based on rules..,
+                        close(client_fd);
+                    }
+                }
+            }
         } else if (ret == 0) {
             // timeout, restart loop, meanwhile we can check if keep_running is set to 0
         }
     }
-    close(server_socket);
+    for (int i = 0; i < g_server_socket_count; i++) {
+        ServerSocket *ss = &g_server_sockets[i];
+        if (ss->fd != -1) {
+            close(ss->fd);
+        }
+    }
     closeSo();
     stop_housekeeper();
     logmsg("GeoD shutdown.");

@@ -176,7 +176,7 @@ void handle_http(PluginContext *pc, ClientContext *ctx, RequestParams *params) {
 int plugin_register(PluginContext *pc, const PluginHostInterface *host) {
     g_host = host;
 
-    host->http.register_http_route(pc, 3, g_routes);
+    host->server.register_http_route(pc, 3, g_routes);
     return 0;
 }
 

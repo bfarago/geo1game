@@ -25,6 +25,12 @@
 #include "global.h"
 #include "http.h"
 #include "plugin.h"
+#include "config.h"
+
+//just for debug
+void logmsg(const char *fmt, ...) ;
+void errormsg(const char *fmt, ...) ;
+void debugmsg(const char *fmt, ...) ;
 
 const char* get_status_text(int status_code){
     const char *status_text;
@@ -79,34 +85,74 @@ void send_chunks(ClientContext *ctx, char* buf, int offset) {
 void send_chunk_end(ClientContext *ctx){
     write(ctx->socket_fd, "0\r\n\r\n", 5);
 }
+void http_debug_hexdump(const char* prefix, char* buf, int len){
+    char hex[256];
+    char ascii[256];
+    int ofs=0;
+    for (int i = 0; i < len; i++) {
+        if (i && (i%32 == 0)) {
+            logmsg("%s %s %s", prefix, hex, ascii);
+            ofs=0;
+        }
+        sprintf(hex + ofs * 3, "%02X ", (unsigned char)buf[i]);
+        char c= (unsigned char)buf[i];
+        if ( (c == '\r' || c == '\n' || c == '\t') || ( c < 32)) {
+            c='.';
+        }
+        sprintf(ascii + ofs, "%c ", c);
+        ofs++;
+    }
+    if (ofs){
+        logmsg("%s %s %s", prefix, hex, ascii);
+    }
+}
+
+void http_debug_hexdump_ctx(ClientContext *ctx, int maxlen){
+    int len = ctx->request_buffer_len;  // strlen(ctx->request_buffer);
+    if (len>maxlen) len=maxlen;
+    http_debug_hexdump( "RX", ctx->request_buffer, len);
+}
 
 void http_parse_request(ClientContext *ctx, HttpRequest *req) {
     memset(req, 0, sizeof(HttpRequest));
+    //logmsg("RXLEN:%d", ctx->request_buffer_len);
 
-    char *line = strtok(ctx->request_buffer, "\r\n");
+    char *saveptr1;
+    char *line = strtok_r(ctx->request_buffer, "\r\n", &saveptr1);
     if (!line) return;
+    //logmsg("len:%d %s", strlen(line), (unsigned int)(line - ctx->request_buffer));
 
+//    int rr = 
     sscanf(line, "%7s %255s", req->method, req->path);
+    //logmsg("rr:%d %s %s", rr, req->method, req->path);
 
     char *query_start = strchr(req->path, '?');
     if (query_start) {
         *query_start = '\0';
         query_start++;
-        char *param = strtok(query_start, "&");
+        char *param;
+        char *saveptr2;
+        param = strtok_r(query_start, "&", &saveptr2);
         while (param && req->query_count < MAX_QUERY_VARS) {
             char *eq = strchr(param, '=');
             if (eq) {
                 *eq = '\0';
                 strncpy(req->query[req->query_count].key, param, sizeof(req->query[req->query_count].key) - 1);
                 strncpy(req->query[req->query_count].value, eq + 1, sizeof(req->query[req->query_count].value) - 1);
+                //logmsg("%s=%s", req->query[req->query_count].key, req->query[req->query_count].value);
                 req->query_count++;
             }
-            param = strtok(NULL, "&");
+            param = strtok_r(NULL, "&", &saveptr2);
         }
     }
 
-    while ((line = strtok(NULL, "\r\n")) && *line && req->header_count < MAX_HEADER_LINES) {
+    //logmsg(" %s %s", req->method, req->path);
+    //http_debug_hexdump("L0", line, 128);
+
+    while ((line = strtok_r(NULL, "\r\n", &saveptr1)) && *line && req->header_count < MAX_HEADER_LINES) {
+        //http_debug_hexdump("L1", line, 128);
         char *sep = strchr(line, ':');
+        //http_debug_hexdump("L2", line, 128);
         if (sep) {
             *sep = '\0';
             char *key = line;
@@ -114,9 +160,58 @@ void http_parse_request(ClientContext *ctx, HttpRequest *req) {
             while (isspace(*val)) val++;
             strncpy(req->headers[req->header_count].key, key, sizeof(req->headers[req->header_count].key) - 1);
             strncpy(req->headers[req->header_count].value, val, sizeof(req->headers[req->header_count].value) - 1);
+            //logmsg("%s=%s", req->headers[req->header_count].key, req->headers[req->header_count].value);
             req->header_count++;
+        } else {
+            //logmsg("sep=0");
         }
     }
+    
+
+
+    //logmsg(" %s %s", req->method, req->path);
+    req->session_id[0] = '\0';
+    req->cross_forwarded = 0;
+    for (int i = 0; i < req->header_count; i++) {
+        // parse all headers
+        if (strcasecmp(req->headers[i].key, "X-Forwarded-Server") == 0) {
+            strncpy(req->server_name, req->headers[i].value, sizeof(req->server_name) - 1);
+            req->cross_forwarded = 1;
+        } else if (strcasecmp(req->headers[i].key, "X-Forwarded-For") == 0) {
+            strncpy(ctx->client_ip, req->headers[i].value, sizeof(ctx->client_ip) - 1);
+            req->cross_forwarded = 1;
+        } else if (strcasecmp(req->headers[i].key, "Cookie") == 0) {
+            const char* match = "PHPSESSID=";
+            char *phpsessionid = strcasestr(req->headers[i].value, match);
+            if (phpsessionid) {
+                phpsessionid += strlen(match);
+                char *end = strchr(phpsessionid, ';');
+                size_t len = end ? (size_t)(end - phpsessionid) : strlen(phpsessionid);
+                if (len >= sizeof(req->session_id)) len = sizeof(req->session_id) - 1;
+                strncpy(req->session_id, phpsessionid, len);
+                req->session_id[len] = '\0';
+            }
+        }else if (strcasecmp(req->headers[i].key, "host") == 0) {
+            strncpy(ctx->request.server_host, req->headers[i].value, sizeof(ctx->request.server_host) - 1);
+        }
+
+    }
+    char buf[MAX_HTTP_VALUE_LEN];
+    size_t buflen = sizeof(buf);
+    if (req->cross_forwarded) {
+        // there where a proxy, so we need the server outer url, not the actual one.
+        config_get_string("HTTP", "server_uri_prefix", req->server_uri_prefix, MAX_HTTP_VALUE_LEN, "/geoapi");
+        snprintf(buf,buflen, "https://%s%s", req->server_name, req->server_uri_prefix);
+        config_get_string("HTTP", "server_url_prefix", req->server_url_prefix, MAX_HTTP_VALUE_LEN, buf);
+    }else{
+        // there wherer no proxy, so the actual url is the requested.
+        config_get_string("HTTP", "internal_uri_prefix", req->server_uri_prefix, MAX_HTTP_VALUE_LEN, "");
+        snprintf(buf,buflen, "http://%s%s", req->server_host, req->server_uri_prefix);
+        config_get_string("HTTP", "server_url_prefix", req->server_url_prefix, MAX_HTTP_VALUE_LEN, buf);
+    }
+
+    //http_debug_hexdump_ctx(ctx, 8192);
+   // logmsg(" %s %s", req->method, req->path);
 }
 void parse_request_path_and_params(const char *request, RequestParams *params) {
     memset(params, 0, sizeof(RequestParams));

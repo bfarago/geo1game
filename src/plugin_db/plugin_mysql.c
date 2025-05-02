@@ -4,6 +4,7 @@
 #define _GNU_SOURCE
 #include "../plugin.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
 #include <pthread.h>
@@ -35,13 +36,14 @@ const PluginHostInterface *g_host;
 void handle_mysql_status(PluginContext *pc, ClientContext *ctx, RequestParams *params);
 void handle_mysql_query(PluginContext *pc, ClientContext *ctx, RequestParams *params);
 void handle_mysql(PluginContext *pc, ClientContext *ctx, RequestParams *params);
+void handle_user(PluginContext *pc, ClientContext *ctx, RequestParams *params);
 
 static void (*http_routes[])(PluginContext *, ClientContext *, RequestParams *) = {
-    handle_mysql_status, handle_mysql_query
+    handle_mysql_status, handle_mysql_query, handle_user
 };
 
-const char* plugin_http_get_routes[]={"/mysql", "/mysql/query"};
-int plugin_http_get_routes_count = 2;
+const char* plugin_http_get_routes[]={"/mysql", "/mysql/query", "/user"};
+int plugin_http_get_routes_count = 3;
 int g_mysql_con_permanent = 1;
 
 static int close_key() {
@@ -268,7 +270,136 @@ int plugin_thread_init(PluginContext *ctx) {
 int plugin_thread_finish(PluginContext *ctx) {
     return db_thread_end();   // mandatory!
 }
+// Helper: Lookup user info by session_id
+static int get_user_info(MYSQL *conn, const char *session_id, int *user_id, char *nick, char *last_login, char *email, float *lat, float *lon, float *alt) {
+    char query[256];
+    snprintf(query, sizeof(query), "SELECT id, nick, last_login, email, lat, lon, alt FROM users WHERE session_id = '%s'", session_id);
+    if (db_query(conn, query) != 0) return -1;
+    MYSQL_RES *result = mysql_store_result(conn);
+    if (!result) return -1;
+    MYSQL_ROW row = mysql_fetch_row(result);
+    if (row) {
+        *user_id = atoi(row[0]);
+        strncpy(nick, row[1], 59);
+        strncpy(last_login, row[2], 59);
+        strncpy(email, row[3], 59);
+        *lat = row[4] ? atof(row[4]) : 0.0;
+        *lon = row[5] ? atof(row[5]) : 0.0;
+        *alt = row[6] ? atof(row[6]) : 0.0;
+    }
+    mysql_free_result(result);
+    return 0;
+}
 
+// Helper: Count regions for user
+static int get_region_count(MYSQL *conn, int user_id) {
+    char query[128];
+    snprintf(query, sizeof(query), "SELECT COUNT(*) FROM user_regions WHERE user_id = %d", user_id);
+    if (db_query(conn, query) != 0) return -1;
+    MYSQL_RES *result = mysql_store_result(conn);
+    if (!result) return -1;
+    MYSQL_ROW row = mysql_fetch_row(result);
+    int count = row ? atoi(row[0]) : 0;
+    mysql_free_result(result);
+    return count;
+}
+
+// Helper: Get person stats (workers, soldiers, dead)
+static void get_person_stats(MYSQL *conn, int user_id, int *workers, int *soldiers, int *dead) {
+    char query[512];
+    snprintf(query, sizeof(query),
+        "SELECT "
+        "SUM(CASE WHEN p.job_id = 2 AND e.status_id != 5 THEN 1 ELSE 0 END),"
+        "SUM(CASE WHEN p.job_id = 3 AND e.status_id != 5 THEN 1 ELSE 0 END),"
+        "SUM(CASE WHEN e.status_id = 5 THEN 1 ELSE 0 END) "
+        "FROM persons p JOIN entities e ON p.entity_id = e.id "
+        "WHERE e.user_id = %d", user_id);
+    *workers = *soldiers = *dead = 0;
+    if (db_query(conn, query) == 0) {
+        MYSQL_RES *res = mysql_store_result(conn);
+        if (res) {
+            MYSQL_ROW row = mysql_fetch_row(res);
+            if (row) {
+                *workers = row[0] ? atoi(row[0]) : 0;
+                *soldiers = row[1] ? atoi(row[1]) : 0;
+                *dead = row[2] ? atoi(row[2]) : 0;
+            }
+            mysql_free_result(res);
+        }
+    }
+}
+
+// Helper: Append region resources as JSON array
+static int append_region_resources_json(MYSQL *conn, int user_id, char *out, int out_size) {
+    char query[512];
+    snprintf(query, sizeof(query),
+        "SELECT rr.resource_id, res.name, SUM(rr.quantity) "
+        "FROM user_regions ur "
+        "JOIN region_resources rr ON rr.region_id = ur.region_id "
+        "JOIN resources res ON res.id = rr.resource_id "
+        "WHERE ur.user_id = %d "
+        "GROUP BY rr.resource_id, res.name", user_id);
+    if (db_query(conn, query) != 0) return 0;
+    MYSQL_RES *res = mysql_store_result(conn);
+    if (!res) return 0;
+    MYSQL_ROW row;
+    int written = snprintf(out, out_size, "\"resources\": [");
+    int first = 1;
+    while ((row = mysql_fetch_row(res))) {
+        if (!first) written += snprintf(out + written, out_size - written, ",");
+        written += snprintf(out + written, out_size - written,
+            "{\"id\":%s,\"name\":\"%s\",\"quantity\":%s}",
+            row[0], row[1], row[2]);
+        first = 0;
+    }
+    written += snprintf(out + written, out_size - written, "]");
+    mysql_free_result(res);
+    return written;
+}
+
+void handle_user(PluginContext *pc, ClientContext *ctx, RequestParams *params) {
+    (void)pc; (void)params;
+    MYSQL *conn = db_conn();
+    if (!conn || db_open(&conn) != 0) {
+        g_host->http.send_response(ctx->socket_fd, 500, "text/plain", "MySQL connection error");
+        return;
+    }
+
+    int user_id = 0;
+    char nick[60]="", last_login[60]="", email[60]="";
+    float lat, lon, alt;
+    if (get_user_info(conn, ctx->request.session_id, &user_id, nick, last_login, email, &lat, &lon, &alt) != 0) {
+        g_host->http.send_response(ctx->socket_fd, 403, "text/plain", "Invalid session");
+        return;
+    }
+
+    int region_count = get_region_count(conn, user_id);
+    int workers, soldiers, dead;
+    get_person_stats(conn, user_id, &workers, &soldiers, &dead);
+
+    char body[4096];
+    int offset = snprintf(body, sizeof(body),
+        "{\n"
+        "\"session_id\": \"%s\",\n"
+        "\"user_id\": %d,\n"
+        "\"nick\": \"%s\",\n"
+        "\"last_login\": \"%s\",\n"
+        "\"email\": \"%s\",\n"
+        "\"region_count\": %d,\n"
+        "\"workers\": %d,\n"
+        "\"soldiers\": %d,\n"
+        "\"dead\": %d,\n"
+        "\"lat\": %.4f,\n"
+        "\"lon\": %.4f,\n"
+        "\"alt\": %.4f,\n",
+        ctx->request.session_id, user_id, nick, last_login, email,
+        region_count, workers, soldiers, dead, lat, lon, alt);
+
+    offset += append_region_resources_json(conn, user_id, body + offset, sizeof(body) - offset);
+    offset += snprintf(body + offset, sizeof(body) - offset, "\n}\n");
+
+    g_host->http.send_response(ctx->socket_fd, 200, "application/json", body);
+}
 void handle_mysql_status(PluginContext *pc, ClientContext *ctx, RequestParams *params) {
     (void)pc; // Unused parameter
     (void)params; // Unused parameter
@@ -354,6 +485,17 @@ void handle_mysql(PluginContext *pc, ClientContext *ctx, RequestParams *params) 
 
 int plugin_register(PluginContext *pc, const PluginHostInterface *host) {
     g_host = host;
-    host->http.register_http_route((void*)pc, plugin_http_get_routes_count, plugin_http_get_routes);
+    host->server.register_http_route((void*)pc, plugin_http_get_routes_count, plugin_http_get_routes);
     return PLUGIN_SUCCESS;
+}
+
+int plugin_event(PluginContext *pc, PluginEventType event, const PluginEventContext* ctx) {
+    (void)pc;
+    (void)ctx;
+    if (event == PLUGIN_EVENT_STANDBY) {
+        if (!queue_is_empty()) {
+            return 1;   // If queue is not empty, return 1 to indicate that the plugin should continue processing events
+        }
+    }
+    return 0;
 }

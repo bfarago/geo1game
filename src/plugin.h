@@ -1,15 +1,34 @@
 #ifndef PLUGIN_H
 #define PLUGIN_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+
 #include "global.h"
 #include "http.h"
 #include "image.h"
+#include "cache.h"
 
 #define PLUGIN_SUCCESS 0
 #define PLUGIN_ERROR (-1)
+// Plugin event types and context
+typedef enum {
+    PLUGIN_EVENT_STANDBY = 1,
+    // Future events can be added here
+} PluginEventType;
+
+typedef struct {
+    int reserved; // Future use, can be union
+} PluginEventContext;
 
 struct PluginContext;
 #define PCHANDLER struct PluginContext*
+
+// Generic plugin event handler type
+typedef int (*plugin_event_handler_t)(PCHANDLER, PluginEventType event, const PluginEventContext* ctx);
+
 struct DbQuery;
 
 typedef struct TerrainInfo{
@@ -34,15 +53,24 @@ typedef struct MapHostInterface{
     int (*stop_map_context)(void);
     int (*get_map_info)(TerrainInfo *info, float lat, float lon);
 } MapHostInterface;
+typedef struct{
+    void (*register_http_route)(struct PluginContext* pc, int cout, const char *route[]);
+    void (*register_control_route)(struct PluginContext* pc, int cout, const char *route[]);
+}ServerHostInterface;
 
 typedef struct {
-    void (*register_http_route)(struct PluginContext* pc, int cout, const char *route[]);
+   //  void (*register_http_route)(struct PluginContext* pc, int cout, const char *route[]);
     void (*send_response)(int clientid, int status_code, const char *content_type, const char *body);
     void (*send_file)(int clientid, const char * content_type, const char *path);
     void (*send_chunk_head)(ClientContext *ctx, int status_code, const char *content_type);
     void (*send_chunks)(ClientContext *ctx, char* buf, int offset);
     void (*send_chunk_end)(ClientContext *ctx);
 } HttpHostInterface;
+
+typedef struct {
+    // other plugins can use this, when ws plugin is loaded...
+    void (*handshake)(PCHANDLER pc, WsRequestParams* wsp, const char *msg); // dummy example.
+} WsHostInterface;
 
 typedef struct {
     int (*context_start)(PCHANDLER pc);
@@ -65,9 +93,12 @@ typedef struct {
     int (*config_get_string)(const char *grou, const char *key, char *buf, int buf_size, const char *default_value);
     int (*config_get_int)(const char *grou, const char *key, int default_value);
     void (*register_db_queue)(PCHANDLER pc, const char *name);
+    ServerHostInterface server;
     HttpHostInterface http;
+    WsHostInterface ws;
     MapHostInterface map;
     ImageHostInterface image;
+    CacheHostInterface cache;
 } PluginHostInterface;
 
 // HTTP host side
@@ -76,7 +107,19 @@ typedef struct {
     PluginHttpRequestHandler request_handler;
 } PluginHttpFunctions;
 
-// DB host side
+// WS host side
+typedef void (*PluginWsRequestHandler)(PCHANDLER, ClientContext *ctx, WsRequestParams *params);
+typedef struct {
+    PluginWsRequestHandler request_handler;
+} PluginWsFunctions;
+
+// Control
+typedef void (*PluginControlRequestHandler)(PCHANDLER, ClientContext *ctx, char* cmd, int argc, char **argv);
+typedef struct{
+    PluginControlRequestHandler request_handler;
+} PluginControlFunctions;
+
+// DB host side (preliminary)
 typedef void (*DbQueryResultProcessor)(void);
 typedef struct DbQuery{
     char query[256];
@@ -86,6 +129,7 @@ typedef void (*PluginDbRequestHandler)(PCHANDLER, DbQuery *query);
 typedef struct {
     PluginDbRequestHandler db_request_handler;
 } PluginDbFunctions;
+
 // IMAGE host side
 typedef int (*PluginImageCreate)(PCHANDLER, Image *image, const char *filename, unsigned int width, unsigned int height, ImageBackendType backend, ImageFormat format, ImageBufferFormat buffer_type);
 typedef int (*PluginImageDestroy)(PCHANDLER, Image *image);
@@ -105,6 +149,23 @@ typedef void (*plugin_finish_t)(PCHANDLER);
 typedef int (*plugin_thread_init_t)(PCHANDLER );
 typedef int (*plugin_thread_finish_t)(PCHANDLER );
 
+// initialized at the first init, but kept in memory.
+typedef struct HttpCapabilities{
+    int http_route_count;
+    char **http_routes;
+} HttpCapabilities;
+
+typedef struct WsCapabilities{
+    int ws_route_count;
+    char **ws_routes;
+}WsCapabilities;
+
+typedef struct{
+    int route_count;
+    char **routes;
+} ControlCapabilities;
+
+// This is the common (union of) the all plugins
 typedef struct PluginContext{
     int id;
     char name[MAX_PLUGIN_NAME];  // plugin file neve
@@ -120,23 +181,36 @@ typedef struct PluginContext{
     unsigned long last_used;
     int used_count;
 
-    // registered information
-    int http_route_count;
-    char **http_routes;
+    // registered information, this part will kept in memory
+    HttpCapabilities http_caps;
+    ControlCapabilities control_caps;
+    WsCapabilities ws_caps;
 
-    // dynamic/optional functions
+    // dynamic/optional functions, this is only available, when a plugin is already started.
+    // HTTP
     PluginHttpFunctions http;
+    // WS
+    PluginWsFunctions ws;
+    // Control
+    PluginControlFunctions control;
     // DB functions
     PluginDbFunctions db;
     // Image functions
     PluginImageFunctions image;
+    // Generic event handler (optional)
+    plugin_event_handler_t plugin_event;
 } PluginContext;
 
 void register_http_routes(PluginContext *ctx, int count, const char *routes[]);
-
+void register_ws_routes(PluginContext *ctx, int count, const char *routes[]);
+void register_control_routes(PluginContext *ctx, int count, const char *routes[]);
 void register_db_queue(PluginContext *ctx, const char *db);
 
 PluginContext* get_plugin_context(const char *name);
 int plugin_start(int id);
 void plugin_stop(int id);
+
+#ifdef __cplusplus
+}
+#endif
 #endif // PLUGIN_H
