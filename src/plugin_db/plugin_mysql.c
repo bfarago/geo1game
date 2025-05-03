@@ -18,11 +18,13 @@ static int g_mysql_thread_running = 0;
 static pthread_key_t mysql_conn_key;
 static pthread_once_t mysql_key_once = PTHREAD_ONCE_INIT;
 static __thread int db_connection_valid = 0;
-typedef void (*QueryResultProc)(MYSQL *conn, const char *query, MYSQL_RES *result);
+
+typedef void (*QueryResultProc)(MYSQL *conn, const char *query, MYSQL_RES *result, void *user_data);
 
 typedef struct QueryRequest {
-    char query[256];
+    DbQuery *query;
     QueryResultProc result_proc;
+    void *user_data;
 } QueryRequest;
 
 static pthread_mutex_t queue_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -197,7 +199,13 @@ static void queue_push(QueryRequest *req) {
     }
     pthread_mutex_unlock(&queue_mutex);
 }
-
+void plugin_mysql_db_request_handler(DbQuery *query, QueryResultProc result_proc, void *user_data) {
+    QueryRequest req ;
+    req.query = query;
+    req.result_proc = result_proc;
+    req.user_data = user_data;
+    queue_push(&req); //will copy it in the queue
+}
 static void process_request(QueryRequest *req) {
     MYSQL *conn = db_conn();
     if (conn == NULL) {
@@ -216,7 +224,21 @@ static void process_request(QueryRequest *req) {
         db_close(conn);
         return;
     }
-    req->result_proc(conn, req->query, result);
+    int row_index = 0;
+    int num_fields = mysql_num_fields(result);
+    MYSQL_ROW row;
+    while ((row = mysql_fetch_row(result)) && row_index < 16) {
+        int offset = 0;
+        for (int i = 0; i < num_fields; ++i) {
+            char *row_out = res->rows[row_index];
+            int row_out_size = sizeof(res->rows[row_index]);
+            if (i > 0) offset += snprintf(row_out + offset, row_out_size - offset, "|");
+            offset += snprintf(row_out + offset, row_out_size - offset, "%s", row[i] ? row[i] : "");
+        }
+        row_index++;
+    }
+    res->result_count = row_index;
+    req->result_proc(NULL, req, req->user_data);
     mysql_free_result(result);
 }
 void *mysql_thread_main(void *arg) {
@@ -246,6 +268,7 @@ void *mysql_thread_main(void *arg) {
 }
 int plugin_init(PluginContext* pc, const PluginHostInterface *host) {
     g_host = host;
+    pc->db.request = plugin_mysql_db_request_handler;
     pc->http.request_handler = (void*) handle_mysql;
     if (pthread_create(&g_mysql_thread, NULL, mysql_thread_main, NULL) != 0) {
         g_host->logmsg("Failed to create MySQL thread");

@@ -565,11 +565,17 @@ int plugin_unload(int id){
     if (pc->handle) {
         // Call plugin_event(PLUGIN_EVENT_STANDBY) if present before finish
         if (pc->plugin_event) {
+            int ev=0;
             PluginEventContext evctx = {0};
-            int ev = pc->plugin_event(pc, PLUGIN_EVENT_STANDBY, &evctx);
+            if (pc->tried_to_shutdown > 3) {
+                ev = pc->plugin_event(pc, PLUGIN_EVENT_TERMINATE, &evctx);
+            } else{
+                ev = pc->plugin_event(pc, PLUGIN_EVENT_STANDBY, &evctx);
+            }
             if (ev != 0) {
                 debugmsg("Plugin %s requested delay for standby", pc->name);
-                return -1;
+                pc->tried_to_shutdown++;
+                return 2;
             }
         }
         if (pc->plugin_finish) {
@@ -682,8 +688,14 @@ void housekeeper_plugins(time_t now ){
             if (pc->used_count <= 0) {
                 time_t last = (time_t)pc->last_used;
                 if (difftime(now, last) > PLUGIN_IDLE_TIMEOUT) {
-                    plugin_unload(i);
-                    debugmsg("Plugin unloaded: %s", pc->name);
+                    int res= plugin_unload(i);
+                    if (0 == res){
+                        debugmsg("Plugin unloaded: %s", pc->name);
+                    }else if (-1 == res) {
+                        errormsg("Plugin unload failed: %s", pc->name);
+                    }else if (2 == res) {
+                        debugmsg("Kept running, due to the plugin requested more time...");
+                    }
                 }
             }
         }
@@ -874,6 +886,9 @@ void *onProcessControl(void *arg) {
                     }else{
                         dprintf(ctx->socket_fd, "staistics\n");
                     }
+                }else if (strcasecmp(line, "debug") == 0) {
+                    g_debug_msg_enabled = (g_debug_msg_enabled)?0:1;
+                    dprintf(ctx->socket_fd, "debug: %s\n", g_debug_msg_enabled?"on":"off");
                 }else{
                     for (int id = 0; id < g_PluginCount; id++) {
                         PluginContext *pctx = &g_Plugins[id];
@@ -910,7 +925,48 @@ void *onProcessControl(void *arg) {
 }
 void *onProcessWs(void *arg){
     ClientContext *ctx = (ClientContext *)arg;
-    close_ClientContext(ctx);
+    PluginContext *pctx= get_plugin_context("ws");
+    int wsid = pctx->id;
+    if (!plugin_start(wsid)){
+
+        ctx->result_status = CTX_RUNNING;
+        int total_len = 0;
+        while (total_len < BUF_SIZE - 1) {
+            int bytes = read(ctx->socket_fd, ctx->request_buffer + total_len, BUF_SIZE - 1 - total_len);
+            if (bytes <= 0) {
+                errormsg("Error reading request from client");
+                ctx->result_status = CTX_ERROR;
+                close_ClientContext(ctx);
+                return NULL;
+            }
+            total_len += bytes;
+            ctx->request_buffer[total_len] = '\0';
+            if (strstr(ctx->request_buffer, "\r\n\r\n")) {
+                break;
+            }
+        }
+        ctx->request_buffer_len = total_len;
+        // parse the HTTP protocol side of the request
+        // later, the session handling could be done here
+        http_parse_request(ctx, &ctx->request);
+    
+        // App specific query, if needed for any reason (?)
+        //RequestParams params;
+        //parse_request_path_and_params(ctx->request_buffer, &params);
+        
+        // Handle specific paths
+
+        WsRequestParams wsp;
+        strncpy( wsp.session_id, ctx->request.session_id, sizeof(wsp.session_id));
+
+        debugmsg("before the plugin ws.request_handler");
+        pctx->ws.request_handler(pctx, ctx, &wsp);
+        debugmsg("after the plugin ws.request_handler");
+        close_ClientContext(ctx);
+        plugin_stop(wsid);
+    }else{
+        errormsg("ws plugin not found?");
+    }
     return NULL;
 }
 void *http_handle_client(void *arg) {

@@ -15,7 +15,9 @@ extern "C" {
 #define PLUGIN_ERROR (-1)
 // Plugin event types and context
 typedef enum {
-    PLUGIN_EVENT_STANDBY = 1,
+    PLUGIN_EVENT_SLEEP = 1, // sleep is possible (optional)
+    PLUGIN_EVENT_STANDBY,   // keep waiting, would be nice to stop
+    PLUGIN_EVENT_TERMINATE, // terminate it, shall be stopped.
     // Future events can be added here
 } PluginEventType;
 
@@ -120,14 +122,21 @@ typedef struct{
 } PluginControlFunctions;
 
 // DB host side (preliminary)
-typedef void (*DbQueryResultProcessor)(void);
+//typedef void (*DbQueryResultProcessor)(void);
+struct DbQuery;
+#define DB_QUERY_MAX_QUERY_LEN (256)
+#define DB_QUERY_MAX_ROWS (16)
+#define DB_QUERY_MAX_ROW_LEN (512)
+typedef void (*QueryResultProc)(PCHANDLER, DbQuery* query, void *user_data);
 typedef struct DbQuery{
-    char query[256];
-    DbQueryResultProcessor result_processor;
+    char query[DB_QUERY_MAX_QUERY_LEN];
+    char rows[DB_QUERY_MAX_ROWS][DB_QUERY_MAX_ROW_LEN];
+    int result_count;
 } DbQuery;
-typedef void (*PluginDbRequestHandler)(PCHANDLER, DbQuery *query);
+typedef void (*PluginDbRequestHandler)(DbQuery *query, QueryResultProc result_proc, void *user_data);
+typedef void (*PluginDbQueuePush)();
 typedef struct {
-    PluginDbRequestHandler db_request_handler;
+    PluginDbRequestHandler request;
 } PluginDbFunctions;
 
 // IMAGE host side
@@ -180,6 +189,7 @@ typedef struct PluginContext{
     unsigned long file_mtime;
     unsigned long last_used;
     int used_count;
+    int tried_to_shutdown;
 
     // registered information, this part will kept in memory
     HttpCapabilities http_caps;
