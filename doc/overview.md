@@ -103,3 +103,4 @@ typedef struct {
     unsigned char precip, temp;
     unsigned char flags;
 } MapPoint;
+```

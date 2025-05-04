@@ -33,16 +33,29 @@ typedef int (*plugin_event_handler_t)(PCHANDLER, PluginEventType event, const Pl
 
 struct DbQuery;
 
+/** MAP subsystem
+ * it is a specific (not yet a plugin but .so) module, with a huge memory
+ * footprint, therefore the queries are managed, to help unloading, or
+ * re loading the module code and data segments.
+ */
+
+ /** MAP TerraInfo struct
+ * the basic datatype of an atomic point of the map. */
 typedef struct TerrainInfo{
     float elevation;
     unsigned char r, g, b;
     unsigned char precip, temp;
 } TerrainInfo;
 
+// function prototype for the TerraInfo getter API function
 typedef TerrainInfo (*get_terrain_info_t)(float, float);
-
-typedef void (*mapgen_finish_t)(void);
+// function prototype for the mapgen init
 typedef int (*mapgen_init_t)(void);
+//function prototype for the mapgen finish
+typedef void (*mapgen_finish_t)(void);
+
+/** MapContext
+ * the map subsystem related api from host to the module */
 typedef struct{
     void *lib_handle;
     get_terrain_info_t get_info;
@@ -50,18 +63,27 @@ typedef struct{
     mapgen_init_t mapgen_init;
 } MapContext;
 
+/** MAP subsystem user API
+ * in case of a plugin or main code needs a map data, this API is used. */
 typedef struct MapHostInterface{
     int (*start_map_context)(void);
     int (*stop_map_context)(void);
     int (*get_map_info)(TerrainInfo *info, float lat, float lon);
 } MapHostInterface;
+
+/** Server or daemon side API for plugins to call
+ * The following function are provided to plugins by the host (daemon)
+ * To mainly for register a capability in the unloadable plugin.
+ * In example, the http request path which can be handled by the plugin */
 typedef struct{
     void (*register_http_route)(struct PluginContext* pc, int cout, const char *route[]);
     void (*register_control_route)(struct PluginContext* pc, int cout, const char *route[]);
 }ServerHostInterface;
 
+/** HTTP protocol specific host interface
+ * Plugins / main (users) can call it, to use a http protocol feature, like 
+ * send a resopose back to the clients socket. */
 typedef struct {
-   //  void (*register_http_route)(struct PluginContext* pc, int cout, const char *route[]);
     void (*send_response)(int clientid, int status_code, const char *content_type, const char *body);
     void (*send_file)(int clientid, const char * content_type, const char *path);
     void (*send_chunk_head)(ClientContext *ctx, int status_code, const char *content_type);
@@ -69,11 +91,13 @@ typedef struct {
     void (*send_chunk_end)(ClientContext *ctx);
 } HttpHostInterface;
 
+/** WebSocket interface related API fns */
 typedef struct {
     // other plugins can use this, when ws plugin is loaded...
     void (*handshake)(PCHANDLER pc, WsRequestParams* wsp, const char *msg); // dummy example.
 } WsHostInterface;
 
+/** Image support related API */
 typedef struct {
     int (*context_start)(PCHANDLER pc);
     int (*context_stop)(PCHANDLER pc);
@@ -83,6 +107,12 @@ typedef struct {
     void (*write_row)(PCHANDLER pc, Image *img, void *row);
 } ImageHostInterface;
 
+
+/** Host interfaces
+ *  This is the complete collection of the host provided interfaces.
+ *  Different specialized APIs are definied sperately, but added here,
+ *  Therefore users (plugins) could acces to it, like http.send_response()
+ */
 typedef struct {
     struct PluginContext* (*get_plugin_context)(const char *name);
     void (*start_timer)(PCHANDLER pc, int interval, void (*callback)(PCHANDLER));
@@ -103,6 +133,13 @@ typedef struct {
     CacheHostInterface cache;
 } PluginHostInterface;
 
+/** HOST side called Plugin interfaces
+ * Basically called only by the daemon during operation.
+ * For exaple, a HTTP protocol based daemon thred may directly call
+ * a plugin provided function to deal with the actual phase of the
+ * communication, like routing the request to the best handler fn.
+ */
+
 // HTTP host side
 typedef void (*PluginHttpRequestHandler)(PCHANDLER, ClientContext *ctx, RequestParams *params);
 typedef struct {
@@ -120,6 +157,12 @@ typedef void (*PluginControlRequestHandler)(PCHANDLER, ClientContext *ctx, char*
 typedef struct{
     PluginControlRequestHandler request_handler;
 } PluginControlFunctions;
+
+/** DB subsystem
+ * There is a generous database abstraction, it provides a table view of a
+ * specific data query, and may filled up by another plugin in the background.
+ * Therefore user code may not need a specific knowladge about the data driver.
+ */
 
 // DB host side (preliminary)
 struct DbQuery;
@@ -139,6 +182,10 @@ typedef struct {
     PluginDbRequestHandler request;
 } PluginDbFunctions;
 
+/** Image generator subsystem
+ * Right now, a simple png file exporter only.
+ */
+
 // IMAGE host side
 typedef int (*PluginImageCreate)(PCHANDLER, Image *image, const char *filename, unsigned int width, unsigned int height, ImageBackendType backend, ImageFormat format, ImageBufferFormat buffer_type);
 typedef int (*PluginImageDestroy)(PCHANDLER, Image *image);
@@ -151,12 +198,18 @@ typedef struct PluginImageFunctions{
     PluginImageWriteRow write_row;
 }PluginImageFunctions;
 
-// PLUGIN host side
+/** PLUGIN API for host
+ * Called only by the host side during operation to handle systematic needs, like init, finish an operation cycle.
+ * */
 typedef int (*plugin_register_t)(PCHANDLER, const PluginHostInterface*);
 typedef int (*plugin_init_t)(PCHANDLER, const PluginHostInterface*);
 typedef void (*plugin_finish_t)(PCHANDLER);
 typedef int (*plugin_thread_init_t)(PCHANDLER );
 typedef int (*plugin_thread_finish_t)(PCHANDLER );
+
+/** Capabilities
+ * A plugin may (or may not) implement some specific capabilities, like HTTP route handling.
+ */
 
 // initialized at the first init, but kept in memory.
 typedef struct HttpCapabilities{
@@ -164,17 +217,19 @@ typedef struct HttpCapabilities{
     char **http_routes;
 } HttpCapabilities;
 
+// WebSocket capabilities
 typedef struct WsCapabilities{
     int ws_route_count;
     char **ws_routes;
 }WsCapabilities;
 
+// Control protocol capabilities
 typedef struct{
     int route_count;
     char **routes;
 } ControlCapabilities;
 
-// This is the common (union of) the all plugins
+// This is the common collection (union of) the all plugins
 typedef struct PluginContext{
     int id;
     char name[MAX_PLUGIN_NAME];  // plugin file neve
