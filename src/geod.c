@@ -1128,10 +1128,25 @@ void init_startup_server_sockets() {
     register_server_socket(g_port_http, &g_server_protocols[PROTOCOLID_HTTP], 16);
     register_server_socket(g_port_ws, &g_server_protocols[PROTOCOLID_WS], 16);
     register_server_socket(g_port_control, &g_server_protocols[PROTOCOLID_CONTROL], 4);
-
 }
 
-int main() {
+int main(int argc, char** argv)
+{
+    int opt;
+    while ((opt = getopt(argc, argv, "hc:")) != -1) {
+        switch (opt) {
+            case 'h':
+                printf("Usage: %s [-c config_file] [-h]\n", argv[0]);
+                exit(0);
+            case 'c':
+                strncpy(g_config_file, optarg, sizeof(g_config_file));
+                break;
+            default:
+                fprintf(stderr, "Usage: %s [-c config_file] [-h]\n", argv[0]);
+                exit(1);
+        }
+    }
+
     signal(SIGINT, sigint_handler);
     signal(SIGTERM, sigterm_handler);
     signal(SIGUSR1, sigusr1_handler);

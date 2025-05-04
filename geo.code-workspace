@@ -15,8 +15,14 @@
 			"time.h": "c",
 			"http.h": "c",
 			"handlers.h": "c",
-			"signal.h": "c"
+			"signal.h": "c",
+			"wait.h": "c",
+			"data.h": "c"
 		},
-		"github.copilot.inlineSuggest.enable": false
+		"github.copilot.inlineSuggest.enable": false,
+		"C_Cpp.errorSquiggles": "Disabled",
+		"C_Cpp.intelliSenseEngine": "Disabled",
+		"editor.hover.delay": 5000,
+		"C_Cpp.hover": false
 	}
 }

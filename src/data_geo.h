@@ -25,24 +25,26 @@ typedef int (*geo_get_max_user_fn)(data_handle_t *dh);
 typedef int (*geo_add_user_fn)(data_handle_t *dh, user_data_t* user_data);
 
 /** find user index by session key */
-typedef int (*goe_find_user_index_by_session_fn)(data_handle_t *dh, const char* session_key);
+typedef int (*geo_find_user_index_by_session_fn)(data_handle_t *dh, const char* session_key);
 /** find user index by user_id */
-int (*geo_find_user_index_by_user_id)(data_handle_t *dh, int user_id)
+typedef int (*geo_find_user_index_by_user_id_fn)(data_handle_t *dh, int user_id);
 
-/** find user by session key */ */
+/** find user by session key */
 typedef user_data_t* (*geo_find_user_by_session_fn)(data_handle_t *dh, const char* session_key);
-/** find user by session key */ */
+/** find user by session key */
 typedef user_data_t* (*geo_find_user_by_user_id_fn)(data_handle_t *dh, int user_id);
 /** set user */
-typedef int (*set_user_fn)(data_handle_t *dh, user_data_t *user_data);
+typedef int (*geo_set_user_fn)(data_handle_t *dh, user_data_t *user_data);
 //typedef int (*set_user_session_key_fn)(data_handle_t *dh, int user_id, const char* session_key);
+
 /** you have to cast the general driver provided api fn to this. */
-typedef struct {
+typedef struct data_api_geo_t {
     geo_get_user_fn get_user; // get user by internal index (not user_id !)
     geo_get_max_user_fn get_max_user; // get internally stored max user index
     geo_add_user_fn add_user; // add user
+    geo_set_user_fn set_user;
     geo_find_user_index_by_session_fn find_user_index_by_session;
-    geo_find_user_index_by_user_id find_user_index_by_user_id;
+    geo_find_user_index_by_user_id_fn find_user_index_by_user_id;
     geo_find_user_by_session_fn find_user_by_session;
     geo_find_user_by_user_id_fn find_user_by_user_id;
 

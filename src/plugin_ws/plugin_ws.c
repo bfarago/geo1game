@@ -31,15 +31,16 @@
 #include "../plugin.h"
 #include "../data.h"
 #include "../data_geo.h"
+#include "../data_sql.h"
 
-typedef enum {
+typedef enum CommandResult_t {
     CR_UNKNOWN,
     CR_QUIT,
     CR_PROCESSED,
     CR_ERROR
 } CommandResult_t;
 
-typedef enum {
+typedef enum CommandId_t {
     CMD_NOP,            // Do nothing, unknown, not implemented, etc.
     CMD_DISCONNECT,     // Client requests to disconnect (i.e. leave the browser)
     CMD_PING,           // App layer keep-alive and time sync.
@@ -166,34 +167,45 @@ void ws_http_handler(PluginContext *pc, ClientContext *ctx, RequestParams *param
 }
 
 void ws_send_text_message(ClientContext *ctx, const char *msg) {
-    char frame[1024];
     size_t len = strlen(msg);
-    frame[0] = 0x81; // FIN=1, opcode=1 (text)
+    unsigned char header[10];
+    size_t header_len = 0;
+
+    header[0] = 0x81; // FIN=1, opcode=1 (text)
+
     if (len <= 125) {
-        frame[1] = (unsigned char)len;
-        memcpy(&frame[2], msg, len);
-        write(ctx->socket_fd, frame, 2 + len);
+        header[1] = (unsigned char)len;
+        header_len = 2;
     } else if (len <= 65535) {
-        frame[1] = 126;
-        frame[2] = (len >> 8) & 0xFF;
-        frame[3] = len & 0xFF;
-        memcpy(&frame[4], msg, len);
-        write(ctx->socket_fd, frame, 4 + len);
+        header[1] = 126;
+        header[2] = (len >> 8) & 0xFF;
+        header[3] = len & 0xFF;
+        header_len = 4;
     } else {
-        frame[1] = 127;
-        frame[2] = 0; frame[3] = 0; frame[4] = 0; frame[5] = 0;
-        frame[6] = (len >> 24) & 0xFF;
-        frame[7] = (len >> 16) & 0xFF;
-        frame[8] = (len >> 8) & 0xFF;
-        frame[9] = len & 0xFF;
-        memcpy(&frame[10], msg, len);
-        write(ctx->socket_fd, frame, 10 + len);
+        header[1] = 127;
+        header[2] = 0; header[3] = 0; header[4] = 0; header[5] = 0;
+        header[6] = (len >> 24) & 0xFF;
+        header[7] = (len >> 16) & 0xFF;
+        header[8] = (len >> 8) & 0xFF;
+        header[9] = len & 0xFF;
+        header_len = 10;
     }
+
+    size_t total_len = header_len + len;
+    unsigned char *frame = malloc(total_len);
+    if (!frame) {
+        g_host->errormsg("Memory allocation failed in ws_send_text_message");
+        return;
+    }
+
+    memcpy(frame, header, header_len);
+    memcpy(frame + header_len, msg, len);
+    write(ctx->socket_fd, frame, total_len);
+    free(frame);
 }
 void ws_send_json(ClientContext *ctx, json_object *obj) {
-    const char *json_str = json_object_to_json_string(&obj, &json_str);
+    const char *json_str = json_object_to_json_string(obj);
     ws_send_text_message(ctx, json_str);
-    free(json_str);
 }
 
 void ws_send_user_data(ClientContext *ctx, user_data_t* user_data){
@@ -201,8 +213,8 @@ void ws_send_user_data(ClientContext *ctx, user_data_t* user_data){
         struct json_object *obj = json_object_new_object();
         json_object_object_add(obj, "type", json_object_new_string("user_data"));
         json_object_object_add(obj, "user_id", json_object_new_int(user_data->id));
-        json_object_object_add(obj, "lat", json_object_new_double(user_data.lat));
-        json_object_object_add(obj, "lon", json_object_new_double(user_data.lon));
+        json_object_object_add(obj, "lat", json_object_new_double(user_data->lat));
+        json_object_object_add(obj, "lon", json_object_new_double(user_data->lon));
         json_object_object_add(obj, "alt", json_object_new_double(user_data->alt));
         json_object_object_add(obj, "version", json_object_new_int(user_data->version));
         ws_send_json(ctx, obj);
@@ -217,24 +229,24 @@ void ws_send_pong(ClientContext *ctx ) {
 }
 void ws_parse_sql_user(char* row, user_data_t* nuser){
     char *f = strtok(row, "|");
-    nuser.user_id = atoi(f);
+    nuser->id = atoi(f);
     f = strtok(NULL, "|");
-    strcpy(nuser.nick, f);
+    strcpy(nuser->nick, f);
     f = strtok(NULL, "|");
-    nuser.lat = atof(f);
+    nuser->lat = atof(f);
     f = strtok(NULL, "|");
-    nuser.lon = atof(f);
+    nuser->lon = atof(f);
     f = strtok(NULL, "|");
-    nuser.alt = atof(f);
+    nuser->alt = atof(f);
 }
-CtxResultStatus get_user_from_sql_by_session_key(const char *session_key, user_data_t **puser)
+CtxResultStatus ws_get_user_from_sql_by_session_key(const char *session_key, user_data_t *puser)
 {
     data_handle_t *sqlh= data_get_handle_by_name("sql");
     if (sqlh == NULL) {
         errormsg("No sql data handle found");
         return CR_ERROR;
     }
-    data_api_sql_t *geoapi = (data_api_sql_t *)sqlh->specific_api);
+    data_api_sql_t *sqlapi = (data_api_sql_t *)sqlh->specific_api;
     if (sqlapi == NULL) {
         errormsg("No sql data handle found");
     }
@@ -247,33 +259,25 @@ CtxResultStatus get_user_from_sql_by_session_key(const char *session_key, user_d
     }else if (rrc == 0) {
         errormsg("No user found for session key %s", session_key);
         return CR_ERROR;
-    }else if (rr > 1) {
+    }else if (rrc > 1) {
         debugmsg("More than one user found for session key %s", session_key);
     }
     char * row= q.rows[0];
-    user_data_t nuser = {0};
-    ws_parse_sql_user(row, &nuser);
+    ws_parse_sql_user(row, puser);
     logmsg("User %s logged in with session key %s. User id %d, lat %f, lon %f, alt %f",
-            nuser.nick, session_key,
-            nuser.user_id,
-            nuser.lat, nuser.lon, nuser.alt);
-
-    geoapi->add_user(dh, &nuser);
-    *puser = geapi->find_user_by_user_id(dh, nuser.user_id);
-    if (*puser) {
-        user_id = nuser.id;
-    }else{
-        errormsg("No user found for user_id %d", nuser.user_id);
-    }
+            puser->nick, session_key,
+            puser->id,
+            puser->lat, puser->lon, puser->alt);
+    return CR_PROCESSED;
 }
-CtxResultStatus get_user_from_sql_by_user_id(int user_id, user_data_t **puser)
+CtxResultStatus ws_get_user_from_sql_by_user_id(int user_id, user_data_t *puser)
 {
     data_handle_t *sqlh= data_get_handle_by_name("sql");
     if (sqlh == NULL) {
         errormsg("No sql data handle found");
         return CR_ERROR;
     }
-    data_api_sql_t *geoapi = (data_api_sql_t *)sqlh->specific_api);
+    data_api_sql_t *sqlapi = (data_api_sql_t *)sqlh->specific_api;
     if (sqlapi == NULL) {
         errormsg("No sql data handle found");
     }
@@ -288,21 +292,12 @@ CtxResultStatus get_user_from_sql_by_user_id(int user_id, user_data_t **puser)
         return CR_ERROR;
     }
     char * row= q.rows[0];
-    user_data_t nuser = {0};
-    ws_parse_sql_user(row, &nuser);
-    logmsg("User %s logged in with session key %s. User id %d, lat %f, lon %f, alt %f",
-            nuser.nick, session_key,
-            nuser.user_id,
-            nuser.lat, nuser.lon, nuser.alt);
 
-    geoapi->add_user(dh, &nuser);
-    user = geapi->find_user_by_user_id(dh, nuser.user_id);
-    if (user) {
-        user_id = nuser.id;
-    }else{
-        errormsg("No user found for user_id %d", nuser.user_id);
-        return CR_ERROR;
-    }
+    ws_parse_sql_user(row, puser);
+    logmsg("User %s logged in with session key %s. User id %d, lat %f, lon %f, alt %f",
+            puser->nick, puser->session_key,
+            puser->id,
+            puser->lat, puser->lon, puser->alt);
     return CR_PROCESSED;
 }
 CommandResult_t ws_json_command(ClientContext *ctx, CommandId_t cmd, struct json_object *parsed) {
@@ -323,8 +318,8 @@ CommandResult_t ws_json_command(ClientContext *ctx, CommandId_t cmd, struct json
                 errormsg("No geo data handle found");
                 return CR_ERROR;
             }
-            data_api_geo_t *geoapi = (data_api_geo_t *)dh->specific_api);
-            const char *session_key = &ctx->request->session_id;
+            data_api_geo_t *geoapi = (data_api_geo_t *)dh->specific_api;
+            const char *session_key = ctx->request.session_id;
             if (strlen(session_key) == 0) {
                 debugmsg("There was no session in the header. Get from ws.");
                 struct json_object *session_id_obj;
@@ -336,7 +331,7 @@ CommandResult_t ws_json_command(ClientContext *ctx, CommandId_t cmd, struct json
                 errormsg("There was no session_key.");
                 return CR_ERROR;
             }
-            if ((strlen(session_key) < 5) || (strlen(session_key) > 50  ) {
+            if ((strlen(session_key) < 5) || (strlen(session_key) > 50 ) ) {
                 errormsg("The session_key was wrong.");
                 return CR_ERROR;
             }
@@ -344,7 +339,7 @@ CommandResult_t ws_json_command(ClientContext *ctx, CommandId_t cmd, struct json
             struct json_object *user_id_obj;
             if (json_object_object_get_ex(parsed, "user_id", &user_id_obj)) {
                 int ws_user_id= json_object_get_int(user_id_obj);
-                if ((ws_user_id >= 0) && {ws_user_id <= 9999}) {
+                if ((ws_user_id >= 0) && (ws_user_id <= 9999)) {
                     user_id= ws_user_id; // plausible
                 } else {
                     errormsg("The user_id was wrong.");
@@ -356,20 +351,23 @@ CommandResult_t ws_json_command(ClientContext *ctx, CommandId_t cmd, struct json
                 errormsg("The user_id was wrong in the hello protocol.");
                 // return CR_ERROR; // if it is not part, the check otherwise
             }
-            user_data_t* user = geoapi->find_user_by_session_key(dh, session_key);
+            user_data_t* user = geoapi->find_user_by_session(dh, session_key);
             if (user == NULL) {
+                user_data_t nuser;
+                strncpy(nuser.session_key, session_key, sizeof(nuser.session_key));
                 // there was no session yet seen here, but user_id is needed.
                 if (user_id >= 0){
                     user= geoapi->find_user_by_user_id(dh, user_id);
                     if (user){
                         //the user was already here, but different session key (?)
-                        strcpy(user->session_key, session_key);
                         geoapi->set_user(dh, user);
                     } else {
-                        ws_get_user_from_db_by_user_id(user_id, &user);
+                        ws_get_user_from_sql_by_user_id(user_id, &nuser);
+                        geoapi->add_user(dh, &nuser);
                     }
                 } else {
-                    ws_get_user_from_db_by_session_key(session_key, &user);
+                    ws_get_user_from_sql_by_session_key(session_key, &nuser);
+                    geoapi->add_user(dh, &nuser);
                 }
             }
             if (user) {

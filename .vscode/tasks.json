@@ -1,0 +1,31 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+      {
+        "label": "Remote Build",
+        "type": "shell",
+        "command": "ssh",
+        "args": [
+          "brown@myndideal.com",
+          "cd /home/brown/src/geo/src && ./build.sh vscode"
+        ],
+        "group": {
+          "kind": "build",
+          "isDefault": true
+        },
+        "problemMatcher": {
+          "owner": "cpp",
+          "fileLocation": ["absolute"],
+          "pattern": {
+            "regexp": "^([^:]+):(\\d+):(\\d+):\\s+(error|warning):\\s+(.*)$",
+            "file": 1,
+            "line": 2,
+            "column": 3,
+            "severity": 4,
+            "message": 5
+          }
+        }
+      }
+
+    ]
+  }

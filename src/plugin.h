@@ -122,17 +122,17 @@ typedef struct{
 } PluginControlFunctions;
 
 // DB host side (preliminary)
-//typedef void (*DbQueryResultProcessor)(void);
 struct DbQuery;
 #define DB_QUERY_MAX_QUERY_LEN (256)
 #define DB_QUERY_MAX_ROWS (16)
 #define DB_QUERY_MAX_ROW_LEN (512)
-typedef void (*QueryResultProc)(PCHANDLER, DbQuery* query, void *user_data);
+
 typedef struct DbQuery{
     char query[DB_QUERY_MAX_QUERY_LEN];
     char rows[DB_QUERY_MAX_ROWS][DB_QUERY_MAX_ROW_LEN];
     int result_count;
 } DbQuery;
+typedef void (*QueryResultProc)(PCHANDLER,  DbQuery* query, void *user_data);
 typedef void (*PluginDbRequestHandler)(DbQuery *query, QueryResultProc result_proc, void *user_data);
 typedef void (*PluginDbQueuePush)();
 typedef struct {

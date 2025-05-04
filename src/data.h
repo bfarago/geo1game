@@ -7,13 +7,18 @@
 extern "C" {
 #endif
 
+/*
 struct data_t;
 
 typedef void (*data_init_fn)(data_t* data, const char* name);
 typedef void (*data_destroy_fn)(data_t* data);
 typedef void (*data_load_fn)(data_t* data);
 typedef void (*data_store_fn)(data_t* data);
-
+*/
+typedef void (*data_init_fn)();
+typedef void (*data_destroy_fn)();
+typedef int (*data_load_fn)();
+typedef int (*data_store_fn)();
 /** data general api descriptor structure.
  * Similar to file handle descriptor, but for data subsystem
  */
@@ -31,8 +36,8 @@ typedef struct data_descriptor_class_t {
  */
 typedef struct {
     const char* name;
-    data_descriptor_t* descriptor;  // global api descriptor
-    void *specific_api;             // specific api instance
+    const data_descriptor_class_t *descriptor;  // global api descriptor
+    const void *specific_api;             // specific api instance
     void* instance;         // instance specific data
     const char *param;      // instance specific parameter
 } data_handle_t;
@@ -42,12 +47,13 @@ extern int g_data_handles_count;
 extern data_handle_t g_data_handles[MAX_DATA_HANDLES];
 #endif // EXPORT_DATA_INTERNALS
 
+data_handle_t* data_get_handle_by_name(const char* name);
 void* data_get_instance(const char* name);
 int data_register_instance(
     const char* name, const char *param,
-    data_descriptor_t* descriptor,  void* specific_api,
+    const data_descriptor_class_t* descriptor, const void* specific_api,
     void* instance);
-
+void data_unregister_instance(const char* name);
 #ifdef __cplusplus
 }
 #endif

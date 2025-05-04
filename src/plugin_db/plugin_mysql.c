@@ -19,8 +19,7 @@ static pthread_key_t mysql_conn_key;
 static pthread_once_t mysql_key_once = PTHREAD_ONCE_INIT;
 static __thread int db_connection_valid = 0;
 
-typedef void (*QueryResultProc)(MYSQL *conn, const char *query, MYSQL_RES *result, void *user_data);
-
+// mysql internal
 typedef struct QueryRequest {
     DbQuery *query;
     QueryResultProc result_proc;
@@ -213,8 +212,14 @@ static void process_request(QueryRequest *req) {
         return;
     }
 
-    if (db_query(conn, req->query) != 0) {
-        g_host->logmsg("Failed to execute query: %s", req->query);
+    DbQuery *dbq = req->query;
+    if (!dbq) {
+        g_host->logmsg("Internal query error.");
+         return;
+    }
+
+    if (db_query(conn, dbq->query) != 0) {
+        g_host->logmsg("Failed to execute query: %s", dbq->query);
         db_close(conn);
         return;
     }
@@ -227,18 +232,18 @@ static void process_request(QueryRequest *req) {
     int row_index = 0;
     int num_fields = mysql_num_fields(result);
     MYSQL_ROW row;
-    while ((row = mysql_fetch_row(result)) && row_index < 16) {
+    while ((row = mysql_fetch_row(result)) && row_index < DB_QUERY_MAX_ROWS) {
         int offset = 0;
         for (int i = 0; i < num_fields; ++i) {
-            char *row_out = res->rows[row_index];
-            int row_out_size = sizeof(res->rows[row_index]);
+            char *row_out = dbq->rows[row_index];
+            int row_out_size = sizeof(dbq->rows[row_index]);
             if (i > 0) offset += snprintf(row_out + offset, row_out_size - offset, "|");
             offset += snprintf(row_out + offset, row_out_size - offset, "%s", row[i] ? row[i] : "");
         }
         row_index++;
     }
-    res->result_count = row_index;
-    req->result_proc(NULL, req, req->user_data);
+    dbq->result_count = row_index;
+    req->result_proc(NULL, dbq, req->user_data);
     mysql_free_result(result);
 }
 void *mysql_thread_main(void *arg) {

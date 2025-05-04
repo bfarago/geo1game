@@ -32,6 +32,8 @@ typedef struct {
 static ConfigGroup config_groups[MAX_GROUPS];
 static int config_group_count = 0;
 static int config_initialized = 0;
+char g_config_file[MAX_PATH] = CONFIG_FILE;
+
 
 int config_search_group(const char *group) {
     for (int i = 0; i < config_group_count; i++) {
@@ -51,8 +53,9 @@ int config_search_key(int group_index, const char *key) {
     }
     return -1;
 }
+
 static void config_read_all() {
-    FILE *f = fopen(CONFIG_FILE, "r");
+    FILE *f = fopen(g_config_file, "r");
     if (!f) {
         logmsg("Error opening config file: %s\n", strerror(errno));
         return;

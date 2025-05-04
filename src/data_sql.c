@@ -16,8 +16,14 @@
 #include "plugin.h"
 
 //this one is preliminary due to later we could move this to a plugin...
-extern PluginHostInterface g_plugin_host;
-PluginHostInterface *g_host= &g_plugin_host;
+// extern PluginHostInterface g_plugin_host;
+extern PluginHostInterface *g_host; //= &g_plugin_host;
+
+// actually singleton, but lets define the instance type:
+typedef struct sql_data_t{
+    int initialized;
+}sql_data_t;
+
 
 // Updated sql_data_t definition
 typedef struct {
@@ -29,8 +35,8 @@ typedef struct {
 
 void data_sql_init();
 void data_sql_destroy();
-void data_sql_load();
-void data_sql_store();
+int data_sql_load();
+int data_sql_store();
 
 const data_descriptor_class_t g_data_descriptor_sql = {
     .id = 0,    // run-time type identifier
@@ -41,6 +47,8 @@ const data_descriptor_class_t g_data_descriptor_sql = {
     .store = data_sql_store,
 };
 void data_sql_queue_callback(PluginContext* dbplugin, DbQuery *req, void *user_data){
+    (void)dbplugin;
+    (void)req;
     sql_internal_db_request_t *res = (sql_internal_db_request_t *)user_data;
     pthread_mutex_lock(&res->lock);
     res->ready = 1;
@@ -80,14 +88,20 @@ int data_sql_execute(data_handle_t *handle, DbQuery *db_query) {
     plugin_stop(pcmysql->id);
     return db_query->result_count;
 }
+/** specific api descriptor */
+const data_api_sql_t g_data_api_sql = {
+    .execute = data_sql_execute
+};
+
+
 void data_sql_init() {
     sql_data_t* sql_data = malloc(sizeof(sql_data_t));
     if (!sql_data) {
         fprintf(stderr, "Failed to allocate sql_data\n");
         return;
     }
-
-    g_data_descriptor_sql.init(sql_data, g_data_descriptor_sql.name);
+    sql_data->initialized = 1;
+    // g_data_descriptor_sql.init(sql_data, g_data_descriptor_sql.name);
 
     int result = data_register_instance(
         g_data_descriptor_sql.name,  // instance name
@@ -109,19 +123,17 @@ void data_sql_destroy() {
         free(sql_data);
     }
 }
-void data_sql_load() {
+int data_sql_load() {
     sql_data_t* sql_data = data_get_instance(g_data_descriptor_sql.name);
     if (sql_data) {
-        sql_load(sql_data);
+        //sql_load_instance(sql_data);
     }
+    return 0;
 }
-void data_sql_store() {
+int data_sql_store() {
     sql_data_t* sql_data = data_get_instance(g_data_descriptor_sql.name);
     if (sql_data) {
-        sql_store(sql_data);
+        //sql_store_instance(sql_data);
     }
+    return 0;
 }
-/** specific api descriptor */
-const data_api_sql_t g_data_api_sql = {
-    .execute = data_sql_execute,
-};
