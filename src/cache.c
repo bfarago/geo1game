@@ -1,3 +1,13 @@
+/*
+ * File:    cache.c
+ * Author:  Barna Faragó MYND-ideal ltd.
+ * Created: 2025-04-10
+ * 
+ * cache utility functions
+ * Key features:
+ *  manage cache director and files.
+ *  create, remove, rename, write
+ */
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,6 +18,7 @@
 #include "cache.h"
 #include "config.h"
 
+// Global string for the configured cache dir
 char g_cache_dir[MAX_PATH];
 
 // Initialize cache directory: create if missing, cleanup old cache files
@@ -56,14 +67,16 @@ void cachedir_init(const char *path) {
     }
     closedir(dir);
 }
+// init, called from the main at early point.
 void cachesystem_init(void){
     config_get_string("CACHE", "dir", g_cache_dir, MAX_PATH, CACHE_DIR);
     cachedir_init(g_cache_dir);
 }
+// respond with the configured cache dir
 const char* cache_get_dir(void){
     return g_cache_dir;
 }
-
+// built in simple hash function
 unsigned long _hash(const char *str) {
     unsigned long hash = 0;
     int c;
@@ -72,7 +85,7 @@ unsigned long _hash(const char *str) {
     return hash;
 }
 
-// CacheFile
+// CacheFile class
 
 int cache_file_exists_recent(CacheFile *cf){
     return file_exists_recent(cf->path, CACHE_TIME);

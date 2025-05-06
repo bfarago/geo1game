@@ -1,3 +1,12 @@
+/*
+ * File:    http.h
+ * Author:  Barna Faragó MYND-ideal ltd.
+ * Created: 2025-04-10
+ * 
+ * Hyper Text Transfer Protocol layer
+ * Key features:
+ * Collects the header and querery keys. 
+ */
 #ifndef HTTP_H
 #define HTTP_H
 #define _GNU_SOURCE
@@ -70,6 +79,13 @@ typedef struct {
     char cross_forwarded;
 } HttpRequest;
 
+/**
+ * Client context
+ * HTTP server accept a new client connection, and process the header. When the necessary information
+ * has been sucessfully collected, then request path field processed, by matching with predefinied
+ * path routing handlers. In case of one of the plugin's route is matching, then http_handler function
+ * will be called, with this Context. 
+ */
 typedef struct ClientContext {
     // Common fields
     int socket_fd;
@@ -87,18 +103,22 @@ typedef struct ClientContext {
     char request_buffer[BUF_SIZE];
 } ClientContext;
 
+/** HTTP protocol related request's handler
+ */
 typedef void (*RequestHandler)(ClientContext *ctx, RequestParams *params);
 typedef struct {
     char path[MAX_HTTP_KEY_LEN];
     RequestHandler handler;
 } HttpRouteRule;
 /**************************************************************************/
+/** Web Socket Request handler */
 typedef void (*WsRequestHandler)(ClientContext *ctx, WsRequestParams *params);
 typedef struct {
     char path[MAX_HTTP_KEY_LEN];
     RequestHandler handler;
 } WsRouteRule;
 /**************************************************************************/
+/** Control socket Request handler */
 typedef void (*ControlRequestHandler)(ClientContext *ctx, ControlRequestParam *params);
 typedef struct {
     char path[MAX_HTTP_KEY_LEN];

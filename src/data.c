@@ -1,5 +1,13 @@
-/**
+/*
+ * File:    data.c
+ * Author:  Barna Faragó MYND-ideal ltd.
+ * Created: 2025-04-10
  * 
+ * Data abstraction layer
+ * Key features:
+ *  init-destroy
+ *  load-store : from a local file when service restarts
+ *  register class/instance
  */
 #define _GNU_SOURCE
 #include <time.h>
@@ -17,6 +25,7 @@
 #include "data.h"
 
 #define MAX_DATA_DESCRIPTORS (10)
+
 int g_data_descriptors_count = 0;
 data_descriptor_class_t g_data_descriptors[MAX_DATA_DESCRIPTORS];
 

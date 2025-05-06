@@ -1,3 +1,17 @@
+/*
+ * File:    geod.c
+ * Author:  Barna Faragó MYND-ideal ltd.
+ * Created: 2025-04-10
+ * 
+ * GEO daemon main source file
+ * Key features:
+ *  Daemon startup
+ *      config load
+ *      process id handling (checks)
+ *      listen , bind sockets
+ *  Manage cyclic tasks
+ *  Load and unload .so plugins
+ */
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>

@@ -1,3 +1,12 @@
+/*
+ * File:    data_geo.c
+ * Author:  Barna Faragó MYND-ideal ltd.
+ * Created: 2025-04-10
+ * 
+ * Data layer, geo app specific part
+ * Key features:
+ *  session handling, user data handling
+ */
 #define _GNU_SOURCE
 #include <time.h>
 #include <stdio.h>
@@ -15,6 +24,9 @@
 #include "data.h"
 #include "data_geo.h"
 
+/** internal geo_data instance
+ * serializable to a local file (load-store)
+ * indexed by session and id , using json hash search */
 typedef struct geo_data_t {
     struct json_object *json_session_user_index_map;
     struct json_object *json_user_id_user_index_map;
@@ -23,6 +35,7 @@ typedef struct geo_data_t {
     pthread_mutex_t lock;
 } geo_data_t;
 
+// file header for load-store format
 typedef struct geo_file_header_t{
     unsigned int version;
     size_t user_data_size;
@@ -34,14 +47,18 @@ typedef struct geo_file_header_t{
     uint32_t head_crc; //(without this)
 }geo_file_header_t;
 
+// main module functions
 
 void data_geo_init();
 void data_geo_load();
 void data_geo_store();
 void data_geo_destroy();
 
-
+/** CRC32 standard (ethernet) polynome
+ */
 #define CRC32_POLY  (0xedb88320)
+/** crc32 function
+ */
 uint32_t crc32c(uint32_t crc, const unsigned char *buf, size_t len)
 {
     int k;
@@ -53,8 +70,10 @@ uint32_t crc32c(uint32_t crc, const unsigned char *buf, size_t len)
     }
     return ~crc;
 }
-
+/** macro, to help file format error handling */
 #define GEOFF_STOP_IF(cond) if (cond){ line = __LINE__; goto stop;}
+
+/** store geo instance to a binary file */
 int geo_store(geo_data_t *geo_data, const char* fname) {
     int res = -1;
     FILE *fp = fopen(fname, "w");
@@ -90,6 +109,7 @@ stop:
     return res;
 }
 
+/** Loads the geo instance from a binary file */
 int geo_load(geo_data_t *geo_data, const char* fname) {
     int res=-1;
     FILE* fp = fopen(fname, "r");
@@ -136,6 +156,7 @@ stop:
     return res;
 }
 
+/** init instance */
 void geo_init(geo_data_t *geo_data){
     geo_data->json_session_user_index_map = json_object_new_object();
     geo_data->json_user_id_user_index_map = json_object_new_object();
@@ -143,12 +164,14 @@ void geo_init(geo_data_t *geo_data){
     pthread_mutex_init(&geo_data->lock, NULL);
 }
 
+/** destroy instance */
 void geo_destroy(geo_data_t *geo_data){
     json_object_put(geo_data->json_session_user_index_map);
     json_object_put(geo_data->json_user_id_user_index_map);
     pthread_mutex_destroy(&geo_data->lock);
 }
 
+/** add user with id and index */
 int geo_user_add_user_id_key(data_handle_t *dh, int user_id, int index){
     geo_data_t* geo_data = (geo_data_t* )dh->instance;
     pthread_mutex_lock(&geo_data->lock);
@@ -162,6 +185,8 @@ int geo_user_add_user_id_key(data_handle_t *dh, int user_id, int index){
     pthread_mutex_unlock(&geo_data->lock);
     return 0;
 }
+
+/** add session key hash for a user-index */
 int geo_user_add_session_key(data_handle_t *dh, const char* session_key, int index){
     geo_data_t* geo_data = (geo_data_t* )dh->instance;
     pthread_mutex_lock(&geo_data->lock);
@@ -173,6 +198,8 @@ int geo_user_add_session_key(data_handle_t *dh, const char* session_key, int ind
     pthread_mutex_unlock(&geo_data->lock);
     return 0;
 }
+
+/** delete user-id hase using user_id input  */
 int geo_user_delete_user_id_key(data_handle_t *dh, int user_id){
     geo_data_t* geo_data = (geo_data_t* )dh->instance;
     pthread_mutex_lock(&geo_data->lock);
@@ -185,6 +212,8 @@ int geo_user_delete_user_id_key(data_handle_t *dh, int user_id){
     pthread_mutex_unlock(&geo_data->lock);
     return 0;
 }
+
+/** delete session-key hash using session key */
 int geo_user_delete_session_key(data_handle_t *dh, const char* session_key){
     geo_data_t* geo_data = (geo_data_t* )dh->instance;
     pthread_mutex_lock(&geo_data->lock);
@@ -195,6 +224,8 @@ int geo_user_delete_session_key(data_handle_t *dh, const char* session_key){
     pthread_mutex_unlock(&geo_data->lock);
     return 0;
 }
+
+/** add user */
 int geo_add_user(data_handle_t *dh, user_data_t* user) {
     geo_data_t* geo_data = (geo_data_t* )dh->instance;
     pthread_mutex_lock(&geo_data->lock);

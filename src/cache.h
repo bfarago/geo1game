@@ -1,3 +1,13 @@
+/*
+ * File:    cache.h
+ * Author:  Barna Faragó MYND-ideal ltd.
+ * Created: 2025-04-10
+ * 
+ * cache utility functions
+ * Key features:
+ *  manage cache director and files.
+ *  create, remove, rename, write
+ */
 #ifndef CACHE_H
 #define CACHE_H
 #include "global.h"
@@ -23,7 +33,7 @@ typedef struct CacheHostInterface
 CacheHostInterface;
 
 
-extern char g_cache_dir[MAX_PATH]; // temoporary
+extern char g_cache_dir[MAX_PATH]; // temoporary export
 
 // main program needs this
 void cachesystem_init(void);
@@ -32,7 +42,7 @@ const char* cache_get_dir(void);
 // subsystems
 void cachedir_init(const char *path);
 
-//CacheFile
+//CacheFile functions
 int cache_file_exists_recent(CacheFile *cf);
 int cache_file_init(CacheFile *cf, const char *name);
 int cache_file_create(CacheFile *cf);

@@ -1,3 +1,12 @@
+/*
+ * File:    handlers.h
+ * Author:  Barna Faragó MYND-ideal ltd.
+ * Created: 2025-04-10
+ * 
+ * Main handlers are statistics, and exaples for the APIs only
+ * Key features:
+ *  status report, info, test page
+ */
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>

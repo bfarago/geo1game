@@ -1,3 +1,14 @@
+/*
+ * File:    data.h
+ * Author:  Barna Faragó MYND-ideal ltd.
+ * Created: 2025-04-10
+ * 
+ * Data abstraction layer
+ * Key features:
+ *  init-destroy
+ *  load-store : from a local file when service restarts
+ *  register class/instance
+ */
 #ifndef DATA_H
 #define DATA_H
 

@@ -1,3 +1,12 @@
+/*
+ * File:    data_geo.h
+ * Author:  Barna Faragó MYND-ideal ltd.
+ * Created: 2025-04-10
+ * 
+ * Data layer, geo app specific part
+ * Key features:
+ *  session handling, user data handling
+ */
 #ifndef DATA_GEO_H
 #define DATA_GEO_H
 #include "data.h"
@@ -6,6 +15,10 @@
 #define MAX_SESSION_KEY_SIZE (64)
 #define MAX_NICK_SIZE (64)
 
+/** user data record type
+ * holds one user: session_key, internal index, user_id
+ * lat, lon, alt, version, nick name.
+ */
 typedef struct {
     char session_key[MAX_SESSION_KEY_SIZE];
     int index;
@@ -15,6 +28,7 @@ typedef struct {
     char nick[MAX_NICK_SIZE];
 } user_data_t;
 
+//forward declaration of the geo_data type
 struct  geo_data_t;
 
 /** These are the driver specific api functions */

@@ -1,3 +1,12 @@
+/*
+ * File:    config.h
+ * Author:  Barna Faragó MYND-ideal ltd.
+ * Created: 2025-04-10
+ * 
+ * config utility functions
+ * Key features:
+ *  get string and int config element
+ */
 #ifndef _CONFIG_H
 #define _CONFIG_H
 

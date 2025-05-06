@@ -1,3 +1,12 @@
+/*
+ * File:    http.h
+ * Author:  Barna Faragó MYND-ideal ltd.
+ * Created: 2025-04-10
+ * 
+ * Hyper Text Transfer Protocol layer
+ * Key features:
+ * Collects the header and querery keys. 
+ */
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>

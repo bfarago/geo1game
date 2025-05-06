@@ -1,3 +1,12 @@
+/*
+ * File:    data_sql.c
+ * Author:  Barna Faragó MYND-ideal ltd.
+ * Created: 2025-04-10
+ * 
+ * Data layer sql specific part
+ * Key features:
+ *  execute query
+ */
 #define _GNU_SOURCE
 #include <time.h>
 #include <stdio.h>

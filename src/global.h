@@ -1,3 +1,12 @@
+/*
+ * File:    global.h
+ * Author:  Barna Faragó MYND-ideal ltd.
+ * Created: 2025-04-10
+ * 
+ * Global header
+ * Key features:
+ *  other .c files are usually includes this file, so common things can be here.
+ */
 #ifndef GLOBAL_H
 #define GLOBAL_H
 
@@ -30,6 +39,7 @@
 extern void logmsg(const char *fmt, ...) ;
 extern void errormsg(const char *fmt, ...) ;
 extern void debugmsg(const char *fmt, ...) ;
+
 extern int file_exists(const char *path);
 extern int file_exists_recent(const char *path, int interval);
 extern int housekeeper_is_running(void);

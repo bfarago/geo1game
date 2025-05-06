@@ -1,3 +1,12 @@
+/*
+ * File:    plugin.h
+ * Author:  Barna Faragó MYND-ideal ltd.
+ * Created: 2025-04-10
+ * 
+ * Plugin API interface
+ * Key features:
+ *  registration, host and plugin side APIs
+ */
 #ifndef PLUGIN_H
 #define PLUGIN_H
 

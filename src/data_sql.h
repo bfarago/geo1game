@@ -1,3 +1,12 @@
+/*
+ * File:    data_sql.h
+ * Author:  Barna Faragó MYND-ideal ltd.
+ * Created: 2025-04-10
+ * 
+ * Data layer sql specific part
+ * Key features:
+ *  execute query
+ */
 #ifndef DATA_SQL_H
 #define DATA_SQL_H
 
