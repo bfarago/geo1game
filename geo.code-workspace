@@ -17,7 +17,10 @@
 			"handlers.h": "c",
 			"signal.h": "c",
 			"wait.h": "c",
-			"data.h": "c"
+			"data.h": "c",
+			"data_geo.h": "c",
+			"ws.h": "c",
+			"sync.h": "c"
 		},
 		"github.copilot.inlineSuggest.enable": false,
 		"C_Cpp.errorSquiggles": "Disabled",

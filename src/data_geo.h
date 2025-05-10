@@ -21,7 +21,7 @@
  */
 typedef struct {
     char session_key[MAX_SESSION_KEY_SIZE];
-    int index;
+    size_t index;
     int id;
     double lat, lon, alt;
     unsigned int version;
@@ -33,9 +33,9 @@ struct  geo_data_t;
 
 /** These are the driver specific api functions */
 /** get user by internal index (not user_id !) */
-typedef user_data_t* (*geo_get_user_fn)(data_handle_t *dh, int idx);
+typedef int (*geo_get_user_fn)(data_handle_t *dh, int idx, user_data_t **out_user);
 /** get internally stored max user index */
-typedef int (*geo_get_max_user_fn)(data_handle_t *dh);
+typedef int (*geo_get_max_user_fn)(data_handle_t *dh, int *out_count);
 typedef int (*geo_add_user_fn)(data_handle_t *dh, user_data_t* user_data);
 
 /** find user index by session key */

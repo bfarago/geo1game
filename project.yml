@@ -1,0 +1,61 @@
+:project:
+  :test_root: test/unit
+  :support_root: test/support
+  :vendor_path: test/vendor
+  :build_root: build
+:link:
+  :flags: ['-lssl', '-lcrypto']
+
+:use_mocks: TRUE
+
+:paths:
+  :test: test/unit
+  :source:
+    - src
+    - src/plugin_ws
+  :include: 
+    - src
+    - src/plugin_ws
+    - test/support
+  :support:
+    - test/support
+
+:files:
+  :test:
+    - test/unit/test_data.c
+    - test/unit/test_data_sql.c
+    - test/unit/test_data_geo.c
+  :source:
+    - src/data_sql.c
+  :mock:
+    - src/plugin.h
+    - src/data.h
+    - src/geod.c
+    - src/plugin_ws/ws.c
+
+:flags:
+  :test:
+    :compile:
+      '*':
+        - "-I/opt/homebrew/include"
+    :link:
+      '*':
+        - "/opt/homebrew/lib/libjson-c.dylib"
+        - "-L/opt/homebrew/lib"
+        - "-lssl"
+        - "-lcrypto"
+        
+:cmock:
+  # Core conffiguration
+  :plugins:                        # What plugins should be used by CMock?
+    - :ignore
+    - :callback
+    - :return_thru_ptr
+  :verbosity:  3                   # the options being 0 errors only, 1 warnings and errors, 2 normal info, 3 verbose
+  :when_no_prototypes:  :warn      # the options being :ignore, :warn, or :erro
+  :skeleton_path:  ''              # Subdirectory to store stubs when generated (default: '')
+  :mock_prefix:  'mock_'           # Prefix to append to filenames for mocks
+  :mock_suffix:  ''                # Suffix to append to filenames for mocks
+  :treat_as:
+    sync_mutex_t: INT
+    sync_cond_t: INT

@@ -8,13 +8,17 @@
 #include <unistd.h>
 #include <string.h>
 #include <pthread.h>
+#include <errno.h>
+#include "sync.h"
+
 #include <mysql/mysql.h>
 
+#define DB_MYSQL_MAX_QUEUE_SIZE (16)
+#define QUEUE_LOCK_TIMEOUT (20ul)  // 20ms
+#define QUEUE_WAIT_TIMEOUT (100ul) // 100ms
 
-#define DB_MYSQL_MAX_QUEUE_SIZE 16
-
-static pthread_t g_mysql_thread;
-static int g_mysql_thread_running = 0;
+//static pthread_t g_mysql_thread;
+//static int g_mysql_thread_running = 0;
 static pthread_key_t mysql_conn_key;
 static pthread_once_t mysql_key_once = PTHREAD_ONCE_INIT;
 static __thread int db_connection_valid = 0;
@@ -26,8 +30,8 @@ typedef struct QueryRequest {
     void *user_data;
 } QueryRequest;
 
-static pthread_mutex_t queue_mutex = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t queue_cond = PTHREAD_COND_INITIALIZER;
+// the main queue thred is a singleton, we save the mutex and cond here
+static PluginThreadControl *g_queue_control = NULL;
 static QueryRequest queue[DB_MYSQL_MAX_QUEUE_SIZE];
 static int queue_size = 0;
 static int queue_head = 0;
@@ -180,23 +184,34 @@ static void queue_pop_all() {
     }
 }
 static void queue_clear() {
-    pthread_mutex_lock(&queue_mutex);
-    queue_pop_all();
-    pthread_mutex_unlock(&queue_mutex);
+    if (!g_queue_control) return;
+    if (!sync_mutex_lock(g_queue_control->mutex, QUEUE_LOCK_TIMEOUT)){
+        queue_pop_all();
+        sync_mutex_unlock(g_queue_control->mutex);
+    }else{
+        errormsg("queue_clear lock failure");
+    }
 }
 static int queue_is_empty() {
     return queue_size == 0;
 }
 static void queue_push(QueryRequest *req) {
-    pthread_mutex_lock(&queue_mutex);
-    if (queue_size < sizeof(queue) / sizeof(queue[0])) {
-        queue[(queue_head + queue_size) % (sizeof(queue) / sizeof(queue[0]))] = *req;
-        queue_size++;
-        pthread_cond_signal(&queue_cond);
-    } else {
-        g_host->logmsg("Queue is full, dropping request");
+    if (!g_queue_control || !g_queue_control->keep_running){
+        debugmsg("Queue already stoped, but there is more push coming...");
+        return;
     }
-    pthread_mutex_unlock(&queue_mutex);
+    if (!sync_mutex_lock(g_queue_control->mutex, QUEUE_LOCK_TIMEOUT)){
+        if (queue_size < sizeof(queue) / sizeof(queue[0])) {
+            queue[(queue_head + queue_size) % (sizeof(queue) / sizeof(queue[0]))] = *req;
+            queue_size++;
+            sync_cond_signal(g_queue_control->cond);
+        } else {
+            g_host->logmsg("Queue is full, dropping request");
+        }
+        sync_mutex_unlock(g_queue_control->mutex);
+    }else{
+        errormsg("queue_push lock failure");
+    }
 }
 void plugin_mysql_db_request_handler(DbQuery *query, QueryResultProc result_proc, void *user_data) {
     QueryRequest req ;
@@ -205,6 +220,7 @@ void plugin_mysql_db_request_handler(DbQuery *query, QueryResultProc result_proc
     req.user_data = user_data;
     queue_push(&req); //will copy it in the queue
 }
+
 static void process_request(QueryRequest *req) {
     MYSQL *conn = db_conn();
     if (conn == NULL) {
@@ -246,49 +262,79 @@ static void process_request(QueryRequest *req) {
     req->result_proc(NULL, dbq, req->user_data);
     mysql_free_result(result);
 }
+
 void *mysql_thread_main(void *arg) {
+    PluginContext *pc = (PluginContext*)arg;
+    g_host->thread.enter_own(pc);
+    // pthread_setname_np("mysql_queue");
     db_thread_init();
-    g_mysql_thread_running = 1;
+    if (g_queue_control == NULL){
+        // actually we need these two globally due to the db api has no pc
+        // yeah, the index may depends on implementation, but now 0...
+        g_queue_control = &pc->thread.own_threads[0].control;
+    }else{
+        debugmsg("how is it possible?");
+    }
+    //just for sure, the code is under development...
+    if (g_queue_control != &pc->thread.own_threads[0].control){
+        errormsg("Sanity check failed. Developer issue, check the code !");
+        g_queue_control = &pc->thread.own_threads[0].control;
+    }
+
+    PluginThreadControl *control= g_queue_control;
+    control->keep_running = 1;
     MYSQL *conn = db_conn();
     if (db_open(&conn) != 0) {
         g_host->logmsg("Failed to open MySQL connection");
     } else {
-        while (g_mysql_thread_running) {
-            pthread_mutex_lock(&queue_mutex);
-            while (queue_is_empty() && g_mysql_thread_running) {
-                pthread_cond_wait(&queue_cond, &queue_mutex);
-            }
-            if (g_mysql_thread_running){
-                QueryRequest req = queue_pop();
-                pthread_mutex_unlock(&queue_mutex);
-                process_request(&req);  // db_query stb.
+        while (control->keep_running) {
+            int retWait= 0;
+            int is_empty = 1;
+            if (!sync_mutex_lock(control->mutex, QUEUE_LOCK_TIMEOUT)){
+                do{
+                    is_empty = queue_is_empty();
+                    if (ETIMEDOUT == retWait){
+                        break;  // lets do something else
+                    }
+                    if (is_empty){
+                        //wait for signal or timeout, this will automaticcally unlock while sleep, and lock when waken
+                        retWait = sync_cond_wait(control->cond, control->mutex, QUEUE_WAIT_TIMEOUT);
+                    }
+                } while (control->keep_running && is_empty);
+                if (control->keep_running && !is_empty){
+                    //not empty, process the queue
+                    QueryRequest req = queue_pop();
+                    sync_mutex_unlock(control->mutex);
+                    process_request(&req);  // db_query etc, but it is unlocked state.
+                }else{
+                    sync_mutex_unlock(control->mutex); // unlock anyway.
+                }
+                if (ETIMEDOUT == retWait){
+                    // additionally do some home work...
+                }
             }else{
-                pthread_mutex_unlock(&queue_mutex);
+                sleep(1); //retry later, or wait until the thread is running actually...
             }
         }
         db_close(conn);
     }
     db_thread_end();
+    g_host->thread.exit_own(pc);
     return NULL;
 }
 int plugin_init(PluginContext* pc, const PluginHostInterface *host) {
     g_host = host;
     pc->db.request = plugin_mysql_db_request_handler;
     pc->http.request_handler = (void*) handle_mysql;
-    if (pthread_create(&g_mysql_thread, NULL, mysql_thread_main, NULL) != 0) {
+    if (g_host->thread.create_own(pc, mysql_thread_main, "")){
         g_host->logmsg("Failed to create MySQL thread");
         return PLUGIN_ERROR;
     }
-    return PLUGIN_SUCCESS;
+    return PLUGIN_SUCCESS_OWN_THEAD;
 }
 void plugin_finish(PluginContext* pc) {
-    g_mysql_thread_running = 0;
-
-    pthread_mutex_lock(&queue_mutex);
-    pthread_cond_broadcast(&queue_cond);  // wake up the main thread
-    pthread_mutex_unlock(&queue_mutex);
-
-    pthread_join(g_mysql_thread, NULL);
+    // pc->thread.control.keep_running = 0; // it is already done
+    g_queue_control = NULL; // forget the provider side
     pc->http.request_handler = NULL;
 }
 int plugin_thread_init(PluginContext *ctx) {
@@ -436,7 +482,11 @@ void handle_mysql_status(PluginContext *pc, ClientContext *ctx, RequestParams *p
     int offset = 0;
     offset += snprintf(body + offset, sizeof(body) - offset, "{\n");
     offset += snprintf(body + offset, sizeof(body) - offset, "\"queue_size\": %d,\n", queue_size);
-    offset += snprintf(body + offset, sizeof(body) - offset, "\"queue_running\": %d\n", g_mysql_thread_running);
+    int rr=0;
+    if (g_queue_control){
+        rr = g_queue_control->keep_running;
+    }
+    offset += snprintf(body + offset, sizeof(body) - offset, "\"queue_running\": %d\n", rr);
     offset += snprintf(body + offset, sizeof(body) - offset, "}\n");
     g_host->http.send_response(ctx->socket_fd, 200, "application/json", body);
     g_host->logmsg("%s mysql status request", ctx->client_ip);
@@ -518,11 +568,17 @@ int plugin_register(PluginContext *pc, const PluginHostInterface *host) {
 }
 
 int plugin_event(PluginContext *pc, PluginEventType event, const PluginEventContext* ctx) {
-    (void)pc;
     (void)ctx;
     if (event == PLUGIN_EVENT_STANDBY) {
         if (!queue_is_empty()) {
             return 1;   // If queue is not empty, return 1 to indicate that the plugin should continue processing events
+        }
+    }
+    if ((event == PLUGIN_EVENT_STANDBY) || (event == PLUGIN_EVENT_TERMINATE)){
+        if (pc->used_count < 1){
+            if (g_queue_control) {
+                g_queue_control->keep_running = 0;
+            }
         }
     }
     return 0;

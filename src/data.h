@@ -26,7 +26,7 @@ typedef void (*data_destroy_fn)(data_t* data);
 typedef void (*data_load_fn)(data_t* data);
 typedef void (*data_store_fn)(data_t* data);
 */
-typedef void (*data_init_fn)();
+typedef int (*data_init_fn)();
 typedef void (*data_destroy_fn)();
 typedef int (*data_load_fn)();
 typedef int (*data_store_fn)();

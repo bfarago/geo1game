@@ -15,14 +15,15 @@
 #include "global.h"
 #include "config.h"
 #include "plugin.h"
+#include "pluginhst.h"
 #include "handlers.h"
 #include <png.h>
 
 // extras for stats only
 extern int g_PluginCount;
 extern PluginContext g_Plugins[MAX_PLUGIN];
-extern PluginHostInterface g_plugin_host;
-PluginHostInterface *g_host= &g_plugin_host;
+extern const PluginHostInterface g_plugin_host;
+const PluginHostInterface *g_host= &g_plugin_host;
 
 #define start_map_context g_host->map.start_map_context
 #define stop_map_context g_host->map.stop_map_context

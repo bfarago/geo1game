@@ -10,14 +10,12 @@
  *  register class/instance
  */
 #define _GNU_SOURCE
-#include <time.h>
+//#include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <pthread.h>
 #include <unistd.h>
-#include <signal.h>
-#include <sys/wait.h>
+//#include <sys/wait.h>
 #include <errno.h>
 
 #include <json-c/json.h>
@@ -42,18 +40,22 @@ int data_register_descriptor(data_descriptor_class_t *descriptor){
 int g_data_handles_count = 0;
 data_handle_t g_data_handles[MAX_DATA_HANDLES];
 
-data_handle_t* data_get_handle_by_index(int index) {
+data_handle_t* data_get_handle_by_index(int index){
     if (index < 0 || index >= g_data_handles_count) {
         return NULL;
     }
     return &g_data_handles[index];
 }
 data_handle_t* data_get_handle_by_name(const char* name) {
+    if (g_data_handles_count == 0 || !name) return NULL;
     for (int i = 0; i < g_data_handles_count; ++i) {
-        if (strcmp(g_data_handles[i].name, name) == 0) {
-            return &g_data_handles[i];
+        const char *n = g_data_handles[i].name;
+        if (n){
+            if (strcmp(n, name) == 0) {
+                return &g_data_handles[i];
+            }
         }
-    }
+    }   
     return NULL;
 }
 void* data_get_instance(const char* name) {
@@ -80,5 +82,9 @@ int data_register_instance(
 
 void data_unregister_instance(const char* name){
     (void)name;
-    errormsg("data_unregister_instance is not implemented");
+    data_handle_t *d= data_get_handle_by_name(name);
+    if (d){
+        d->name = "Unregistered"; 
+    }
+    errormsg("data_unregister_instance is not fully implemented");
 }

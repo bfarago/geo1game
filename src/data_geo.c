@@ -6,37 +6,45 @@
  * Data layer, geo app specific part
  * Key features:
  *  session handling, user data handling
+ * 
+ * Known limitations
+ *  user data pointer lifetime is actually longer than a
+ * user session, therefore the users array indexed element
+ * directly provided for other layers, and they can keep
+ * and use the pointer during operation. This design pattern
+ * is a little bit risky if users array need to be reordered
+ * later. So, be carefull when do a refactoring in these
+ * implementations... (but the actual one is fast at least)
  */
 #define _GNU_SOURCE
 #include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <pthread.h>
 #include <unistd.h>
-#include <signal.h>
-#include <sys/wait.h>
 #include <errno.h>
 
-#include <json-c/json.h>
-
 #include "global.h"
+#include "sync.h"
 #include "data.h"
 #include "data_geo.h"
+#include "json_indexlist.h"
+
+#define DATA_GEO_LOCK_TIMEOUT (1000)
 
 /** internal geo_data instance
  * serializable to a local file (load-store)
  * indexed by session and id , using json hash search */
 typedef struct geo_data_t {
-    struct json_object *json_session_user_index_map;
-    struct json_object *json_user_id_user_index_map;
+    json_indexlist_t session_index;
+    json_indexlist_t userid_index;
     size_t users_count;
     user_data_t users[MAX_USERS];
-    pthread_mutex_t lock;
+    sync_mutex_t *lock_users;
 } geo_data_t;
 
 // file header for load-store format
-typedef struct geo_file_header_t{
+typedef struct __attribute__((__packed__)) geo_file_header_t {
     unsigned int version;
     size_t user_data_size;
     size_t users_number;
@@ -45,7 +53,7 @@ typedef struct geo_file_header_t{
     uint32_t json_session_crc;
     uint32_t json_id_crc;
     uint32_t head_crc; //(without this)
-}geo_file_header_t;
+} geo_file_header_t;
 
 // main module functions
 
@@ -83,9 +91,9 @@ int geo_store(geo_data_t *geo_data, const char* fname) {
         head.version = 1;
         head.user_data_size = sizeof(user_data_t);
         head.users_number = geo_data->users_count;
-        const char* strss = json_object_to_json_string(geo_data->json_session_user_index_map);
+        const char* strss = json_object_to_json_string(geo_data->session_index.list);
         head.json_session_len= strlen(strss);
-        const char *strsi = json_object_to_json_string(geo_data->json_user_id_user_index_map);
+        const char *strsi = json_object_to_json_string(geo_data->userid_index.list);
         head.json_id_len= strlen(strsi);
         head.json_session_crc = crc32c(0, (const unsigned char*)strss, head.json_session_len);
         head.json_id_crc = crc32c(0, (const unsigned char*)strsi, head.json_id_len);
@@ -132,8 +140,8 @@ int geo_load(geo_data_t *geo_data, const char* fname) {
         crc = crc32c(0, (const unsigned char*)str, head.json_session_len);
         GEOFF_STOP_IF(crc != head.json_session_crc);
         json_object *obj = json_tokener_parse(str);
-        json_object_put(geo_data->json_session_user_index_map);
-        geo_data->json_session_user_index_map = obj;
+        json_object_put(geo_data->session_index.list);
+        geo_data->session_index.list = obj;
         free(str);
         str= malloc(head.json_id_len);
         GEOFF_STOP_IF(!str);
@@ -142,8 +150,8 @@ int geo_load(geo_data_t *geo_data, const char* fname) {
         crc = crc32c(0, (const unsigned char*)str, head.json_id_len);
         GEOFF_STOP_IF(crc != head.json_id_crc);
         obj = json_tokener_parse(str);
-        json_object_put(geo_data->json_user_id_user_index_map);
-        geo_data->json_user_id_user_index_map = obj;
+        json_object_put(geo_data->userid_index.list);
+        geo_data->userid_index.list = obj;
         free(str);
         geo_data->users_count = head.users_number;
         res=0; // success without an error.
@@ -157,80 +165,81 @@ stop:
 }
 
 /** init instance */
-void geo_init(geo_data_t *geo_data){
-    geo_data->json_session_user_index_map = json_object_new_object();
-    geo_data->json_user_id_user_index_map = json_object_new_object();
-    geo_data->users_count = 0;
-    pthread_mutex_init(&geo_data->lock, NULL);
+int geo_init(geo_data_t *geo_data){
+    if (geo_data){
+        json_indexlist_init(&geo_data->session_index);
+        json_indexlist_init(&geo_data->userid_index);
+        geo_data->users_count = 0;
+        sync_mutex_init(&geo_data->lock_users);
+    }else{
+        errormsg("Wrong argument in geo_init.");
+        return -1;
+    }
+    return 0;
 }
 
 /** destroy instance */
 void geo_destroy(geo_data_t *geo_data){
-    json_object_put(geo_data->json_session_user_index_map);
-    json_object_put(geo_data->json_user_id_user_index_map);
-    pthread_mutex_destroy(&geo_data->lock);
+    if (geo_data){
+        json_indexlist_destroy(&geo_data->session_index);
+        json_indexlist_destroy(&geo_data->userid_index);
+        sync_mutex_destroy(geo_data->lock_users);
+    }else{
+        errormsg("Wrong argument in geo_destroy");
+    }
 }
 
 /** add user with id and index */
-int geo_user_add_user_id_key(data_handle_t *dh, int user_id, int index){
+int geo_user_add_user_id_key(data_handle_t *dh, int user_id, size_t index){
+    if (!dh) return -1;
     geo_data_t* geo_data = (geo_data_t* )dh->instance;
-    pthread_mutex_lock(&geo_data->lock);
     char key[32];
     snprintf(key, sizeof(key), "%d", user_id);
-    json_object_object_add(
-        geo_data->json_user_id_user_index_map,
-        key,
-        json_object_new_int(index)
-    );
-    pthread_mutex_unlock(&geo_data->lock);
-    return 0;
+    return json_indexlist_add(&geo_data->userid_index, key, index );
 }
 
 /** add session key hash for a user-index */
-int geo_user_add_session_key(data_handle_t *dh, const char* session_key, int index){
+int geo_user_add_session_key(data_handle_t *dh, const char* session_key, size_t index){
+    if (!dh) return -1;
     geo_data_t* geo_data = (geo_data_t* )dh->instance;
-    pthread_mutex_lock(&geo_data->lock);
-    json_object_object_add(
-        geo_data->json_session_user_index_map,
-        session_key,
-        json_object_new_int(index)
-    );
-    pthread_mutex_unlock(&geo_data->lock);
-    return 0;
+    return json_indexlist_add(&geo_data->session_index, session_key, index);
 }
 
 /** delete user-id hase using user_id input  */
 int geo_user_delete_user_id_key(data_handle_t *dh, int user_id){
+    if (!dh) return -1;
     geo_data_t* geo_data = (geo_data_t* )dh->instance;
-    pthread_mutex_lock(&geo_data->lock);
     char key[32];
     snprintf(key, sizeof(key), "%d", user_id);
-    struct json_object *existing_value = NULL;
-    if (json_object_object_get_ex(geo_data->json_user_id_user_index_map, key, &existing_value)) {
-        json_object_object_del(geo_data->json_user_id_user_index_map, key);
-    }
-    pthread_mutex_unlock(&geo_data->lock);
-    return 0;
+    return json_indexlist_delete(&geo_data->userid_index, key);
 }
 
 /** delete session-key hash using session key */
 int geo_user_delete_session_key(data_handle_t *dh, const char* session_key){
+    if (!dh) return -1;
     geo_data_t* geo_data = (geo_data_t* )dh->instance;
-    pthread_mutex_lock(&geo_data->lock);
-    struct json_object *existing_value = NULL;
-    if (json_object_object_get_ex(geo_data->json_session_user_index_map, session_key, &existing_value)) {
-        json_object_object_del(geo_data->json_session_user_index_map, session_key);
-    }
-    pthread_mutex_unlock(&geo_data->lock);
-    return 0;
+    return json_indexlist_delete(&geo_data->session_index, session_key);
 }
 
+/** add user internal */
+int geo_add_user_locked(geo_data_t *geo_data, data_handle_t *dh, user_data_t* user, size_t *index){
+    if (geo_data->users_count >= MAX_USERS) {
+        return -1;
+    }
+    *index= geo_data->users_count++;
+    geo_data->users[*index] = *user;
+    geo_user_add_session_key(dh, user->session_key, *index);
+    geo_user_add_user_id_key(dh, user->id, *index);
+    return 0;
+}
 /** add user */
 int geo_add_user(data_handle_t *dh, user_data_t* user) {
+    if(!dh) return -1;
     geo_data_t* geo_data = (geo_data_t* )dh->instance;
-    pthread_mutex_lock(&geo_data->lock);
+    
+    if (sync_mutex_lock(geo_data->lock_users, DATA_GEO_LOCK_TIMEOUT)) return -1;
     if (geo_data->users_count >= MAX_USERS) {
-        pthread_mutex_unlock(&geo_data->lock);
+        sync_mutex_unlock(geo_data->lock_users);
         return -1;
     }
     int index= geo_data->users_count++;
@@ -238,78 +247,71 @@ int geo_add_user(data_handle_t *dh, user_data_t* user) {
     // check , if something need to be delete before this?
     geo_user_add_session_key(dh, user->session_key, index);
     geo_user_add_user_id_key(dh, user->id, index);
-    pthread_mutex_unlock(&geo_data->lock);
+    sync_mutex_unlock(geo_data->lock_users);
     return index;
 }
 
-user_data_t* geo_get_user(data_handle_t *dh, int idx) {
-    geo_data_t* geo_data = (geo_data_t* )dh->instance;
-    pthread_mutex_lock(&geo_data->lock);
+int geo_get_user(data_handle_t *dh, int idx, user_data_t **out_user) {
+    if (!dh || !out_user) return -1;
+    geo_data_t* geo_data = (geo_data_t*)dh->instance;
+    if (sync_mutex_lock(geo_data->lock_users, DATA_GEO_LOCK_TIMEOUT)) return -1;
     if (!geo_data || idx < 0 || idx >= (int)geo_data->users_count) {
-        pthread_mutex_unlock(&geo_data->lock);
-        return NULL;
+        sync_mutex_unlock(geo_data->lock_users);
+        *out_user = NULL;
+        return -1;
     }
-    user_data_t* user_ptr = &geo_data->users[idx];
-    pthread_mutex_unlock(&geo_data->lock);
-    return user_ptr;
+    *out_user = &geo_data->users[idx];
+    sync_mutex_unlock(geo_data->lock_users);
+    return 0;
 }
-int geo_get_max_user(data_handle_t *dh) {
+int geo_get_max_user(data_handle_t *dh, int *out_count) {
+    if(!dh) return -1;
     geo_data_t* geo_data = (geo_data_t* )dh->instance;
-    if (!geo_data) return 0;
-    pthread_mutex_lock(&geo_data->lock);
-    int count = geo_data->users_count;
-    pthread_mutex_unlock(&geo_data->lock);
-    return count;
+    if (!geo_data) return -1;
+    if (sync_mutex_lock(geo_data->lock_users, DATA_GEO_LOCK_TIMEOUT)) return -1;
+    *out_count = geo_data->users_count;
+    sync_mutex_unlock(geo_data->lock_users);
+    return 0;
 }
-int geo_find_user_index_by_session(data_handle_t *dh, const char* session_key) {
+int geo_find_user_index_by_session(data_handle_t *dh, const char* session_key, size_t *index) {
+    if(!dh) return -1;
     geo_data_t* geo_data = (geo_data_t* )dh->instance;
     if (!geo_data || !session_key) return -1;
     if (session_key[0] == '\0') return -1;
-    pthread_mutex_lock(&geo_data->lock);
-    struct json_object *idx_obj = NULL;
-    if (json_object_object_get_ex(geo_data->json_session_user_index_map, session_key, &idx_obj)) {
-        int idx = json_object_get_int(idx_obj);
-        if (idx >= 0 && idx < (int)geo_data->users_count) {
-            pthread_mutex_unlock(&geo_data->lock);
-            return idx;
-        }
-    }
-    pthread_mutex_unlock(&geo_data->lock);
-    return -1;
+    return json_indexlist_search(&geo_data->session_index, session_key, index);
 }
-int geo_find_user_index_by_user_id(data_handle_t *dh, int user_id) {
+int geo_find_user_index_by_user_id(data_handle_t *dh, int user_id, size_t *index) {
+    if (!dh) return -1;
     geo_data_t* geo_data = (geo_data_t* )dh->instance;
     if (!geo_data || (user_id < 0)) return -1;
     char key[32];
     snprintf(key, sizeof(key), "%d", user_id);
-    pthread_mutex_lock(&geo_data->lock);
-    struct json_object *idx_obj = NULL;
-    if (json_object_object_get_ex(geo_data->json_user_id_user_index_map, key, &idx_obj)) {
-        int idx = json_object_get_int(idx_obj);
-        if (idx >= 0 && idx < (int)geo_data->users_count) {
-            pthread_mutex_unlock(&geo_data->lock);
-            return idx;
-        }
-    }
-    pthread_mutex_unlock(&geo_data->lock);
-    return -1;
+    return json_indexlist_search(&geo_data->userid_index, key, index);
 }
 user_data_t* geo_find_user_by_session(data_handle_t *dh, const char* session_key) {
     geo_data_t* geo_data = (geo_data_t* )dh->instance;
-    int index= geo_find_user_index_by_session(dh, session_key);
-    if (index<0) return NULL;
-    pthread_mutex_lock(&geo_data->lock);
-    user_data_t* user_ptr = &geo_data->users[index];
-    pthread_mutex_unlock(&geo_data->lock);
+    size_t index = GEO_INDEX_INVALID;
+    if (geo_find_user_index_by_session(dh, session_key, &index)) return NULL;
+    if (index == GEO_INDEX_INVALID) return NULL;
+    if (sync_mutex_lock(geo_data->lock_users, DATA_GEO_LOCK_TIMEOUT)) return NULL;
+    user_data_t* user_ptr = NULL;
+    if (index < geo_data->users_count){
+        user_ptr = &geo_data->users[index];
+    }
+    sync_mutex_unlock(geo_data->lock_users);
     return user_ptr;
 }
 user_data_t* geo_find_user_by_user_id(data_handle_t *dh, int id) {
     geo_data_t* geo_data = (geo_data_t* )dh->instance;
-    int index= geo_find_user_index_by_user_id(dh, id);
-    if (index<0) return NULL;
-    pthread_mutex_lock(&geo_data->lock);
-    user_data_t* user_ptr = &geo_data->users[index];
-    pthread_mutex_unlock(&geo_data->lock);
+    size_t index = GEO_INDEX_INVALID;
+    if (geo_find_user_index_by_user_id(dh, id, &index)) return NULL;
+    if (index == GEO_INDEX_INVALID) return NULL;
+    if (sync_mutex_lock(geo_data->lock_users, DATA_GEO_LOCK_TIMEOUT)) return NULL;
+    user_data_t* user_ptr = NULL;
+    if (index < geo_data->users_count){
+        user_ptr = &geo_data->users[index];
+    }
+    sync_mutex_unlock(geo_data->lock_users);
     return user_ptr;
 }
 int geo_user_logout(data_handle_t *dh, user_data_t *user) {
@@ -323,45 +325,54 @@ int geo_user_logout(data_handle_t *dh, user_data_t *user) {
     return -1;
 }
 
+/** set User record in memory as the provided argument
+ * 
+ */
 int geo_set_user(data_handle_t *dh, user_data_t *user) {
     geo_data_t* geo_data = (geo_data_t* )dh->instance;
     if (user == NULL) return -1;
-    if (user->session_key == NULL) return -1;
+    if (user->session_key[0] == 0) return -1;
     if (user->id <= 0) return -1;
-    pthread_mutex_lock(&geo_data->lock);
-    int anindex_by_session = geo_find_user_index_by_session(dh, user->session_key);
-    int anindex_by_user_id = geo_find_user_index_by_user_id(dh, user->id);
-    if (user->index < 0) {
-        if(anindex_by_user_id >= 0) {
-            if (anindex_by_session >= 0) {
+    if (sync_mutex_lock(geo_data->lock_users, DATA_GEO_LOCK_TIMEOUT)) return -1;
+    size_t anindex_by_session = GEO_INDEX_INVALID;
+    size_t anindex_by_user_id = GEO_INDEX_INVALID;
+    geo_find_user_index_by_session(dh, user->session_key, &anindex_by_session);
+    geo_find_user_index_by_user_id(dh, user->id, &anindex_by_user_id);
+    if (user->index == GEO_INDEX_INVALID){
+        if(anindex_by_user_id != GEO_INDEX_INVALID) {
+            if (anindex_by_session != GEO_INDEX_INVALID) {
                 user_data_t* existing_user_by_session = &geo_data->users[anindex_by_session];
                 if (existing_user_by_session->id == user->id) {
                     user->index = anindex_by_session;
                     *existing_user_by_session=*user;
                 }else{
+                    int old_id = existing_user_by_session->id;
                     geo_user_logout(dh, existing_user_by_session);
                     user->index = anindex_by_session;
                     *existing_user_by_session = *user;
-                    geo_user_delete_user_id_key(dh, existing_user_by_session->id);
+                    geo_user_delete_user_id_key(dh, old_id);
                     geo_user_add_user_id_key(dh, user->id, user->index);
                 }
+                sync_mutex_unlock(geo_data->lock_users);
+                return 0; // ok
             }    
         }
-        if (user->index >= 0) {
-            pthread_mutex_unlock(&geo_data->lock);
-            return 0;
+        if (user->index != GEO_INDEX_INVALID) {
+            sync_mutex_unlock(geo_data->lock_users);
+            return 0; // ok
         }
     }
-    if (user->index >= 0) {
+    if (user->index != GEO_INDEX_INVALID) {
         geo_data->users[user->index] = *user;
     }else{
-        pthread_mutex_unlock(&geo_data->lock);
-        geo_add_user(dh, user);
+        geo_add_user_locked(geo_data, dh, user, &user->index);
+        sync_mutex_unlock(geo_data->lock_users);
         return 0;
     }
-    pthread_mutex_unlock(&geo_data->lock);
+    sync_mutex_unlock(geo_data->lock_users);
     return 0;
 }
+
 /** data descriptor class
  * base class default initialization data, the function ptrs.
  */
@@ -380,8 +391,8 @@ const data_api_geo_t g_data_api_geo = {
     .get_max_user = geo_get_max_user, // get max user index (stored in memory)
     .add_user = geo_add_user,   // add user data
     .set_user = geo_set_user,
-    .find_user_index_by_session = geo_find_user_index_by_session,
-    .find_user_index_by_user_id = geo_find_user_index_by_user_id,
+    .find_user_index_by_session = (geo_find_user_index_by_session_fn)geo_find_user_index_by_session,
+    .find_user_index_by_user_id = (geo_find_user_index_by_user_id_fn)geo_find_user_index_by_user_id,
     .find_user_by_session = geo_find_user_by_session,
     .find_user_by_user_id = geo_find_user_by_user_id,
     

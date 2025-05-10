@@ -36,6 +36,8 @@
 #define MAPGEN_IDLE_TIMEOUT (60)
 
 
+#define GEO_INDEX_INVALID ((size_t)-1)
+
 extern void logmsg(const char *fmt, ...) ;
 extern void errormsg(const char *fmt, ...) ;
 extern void debugmsg(const char *fmt, ...) ;

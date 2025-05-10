@@ -14,14 +14,16 @@
 extern "C" {
 #endif
 
-
 #include "global.h"
+#include "sync.h"
 #include "http.h"
 #include "image.h"
 #include "cache.h"
 
 #define PLUGIN_SUCCESS 0
+#define PLUGIN_SUCCESS_OWN_THEAD 1
 #define PLUGIN_ERROR (-1)
+
 // Plugin event types and context
 typedef enum {
     PLUGIN_EVENT_SLEEP = 1, // sleep is possible (optional)
@@ -116,6 +118,14 @@ typedef struct {
     void (*write_row)(PCHANDLER pc, Image *img, void *row);
 } ImageHostInterface;
 
+typedef void* (*plugin_thread_main_fn)(void*);
+typedef struct {
+    int (*create_own)(PCHANDLER pc, plugin_thread_main_fn mainfn, const char* name);
+//    int (*register_own)(PCHANDLER pc, pthread_t tid, const char* name);
+    int (*wait_for_own)(PCHANDLER pc);
+    void (*enter_own)(PCHANDLER pc);
+    void (*exit_own)(PCHANDLER pc);
+} ThreadHostInterface;
 
 /** Host interfaces
  *  This is the complete collection of the host provided interfaces.
@@ -134,6 +144,7 @@ typedef struct {
     int (*config_get_string)(const char *grou, const char *key, char *buf, int buf_size, const char *default_value);
     int (*config_get_int)(const char *grou, const char *key, int default_value);
     void (*register_db_queue)(PCHANDLER pc, const char *name);
+    ThreadHostInterface thread;
     ServerHostInterface server;
     HttpHostInterface http;
     WsHostInterface ws;
@@ -238,10 +249,43 @@ typedef struct{
     char **routes;
 } ControlCapabilities;
 
+typedef enum {
+    PLUGIN_STATE_NONE = 0,
+    PLUGIN_STATE_UNLOADED,
+    PLUGIN_STATE_LOADING,
+    PLUGIN_STATE_LOADED,
+    PLUGIN_STATE_INITIALIZED,
+    PLUGIN_STATE_RUNNING,
+    PLUGIN_STATE_SHUTTING_DOWN,
+    PLUGIN_STATE_DISABLED, //due to a detected error
+    PLUGIN_STATE_MAX // the number of the plugin states
+} PluginState_t;
+
+#define MAX_PLUGIN_OWN_THREADS (3) // Typically one only
+
+typedef struct {
+    volatile int keep_running;
+    sync_cond_t *cond;
+    sync_mutex_t *mutex;
+} PluginThreadControl;
+
+typedef struct {
+    sync_thread_t thread; // pthread_t
+    int running;
+    char name[16];
+    PluginThreadControl control;
+} PluginOwnThreadInfo;
+
+typedef struct {
+    PluginOwnThreadInfo own_threads[MAX_PLUGIN_OWN_THREADS];
+    int own_threads_count;
+}PluginThreadData;
+
 // This is the common collection (union of) the all plugins
 typedef struct PluginContext{
     int id;
     char name[MAX_PLUGIN_NAME];  // plugin file neve
+    PluginState_t state;
 
     // loaded information
     void *handle;
@@ -254,6 +298,8 @@ typedef struct PluginContext{
     unsigned long last_used;
     int used_count;
     int tried_to_shutdown;
+
+    PluginThreadData thread;
 
     // registered information, this part will kept in memory
     HttpCapabilities http_caps;
@@ -275,10 +321,6 @@ typedef struct PluginContext{
     plugin_event_handler_t plugin_event;
 } PluginContext;
 
-void register_http_routes(PluginContext *ctx, int count, const char *routes[]);
-void register_ws_routes(PluginContext *ctx, int count, const char *routes[]);
-void register_control_routes(PluginContext *ctx, int count, const char *routes[]);
-void register_db_queue(PluginContext *ctx, const char *db);
 
 PluginContext* get_plugin_context(const char *name);
 int plugin_start(int id);
