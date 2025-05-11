@@ -51,6 +51,41 @@ const char* plugin_http_get_routes[]={"/mysql", "/mysql/query", "/user"};
 int plugin_http_get_routes_count = 3;
 int g_mysql_con_permanent = 1;
 
+typedef enum{
+    det_args,
+    det_memory,
+    det_init, det_destroy,
+    det_lock, det_lock_timeout, det_unlock,
+    det_signal, det_broadcast,
+    det_wait, det_wait_timeout,
+    det_join,
+    det_file, det_dlopen, det_pluginapi,
+    det_connect, det_character_set,
+    det_conn_invalid,
+    det_query, det_result,
+    det_queue_full,
+    det_max
+} detid;
+
+static unsigned char g_dets[det_max];
+static unsigned short g_detlines[det_max];
+
+static inline void reportDet(detid id, unsigned short line){
+    if (g_dets[id] < 255) g_dets[id]++;
+    g_detlines[id] = line;
+}
+int plugin_det_str_dump(char* buf, int len){
+    int o=0;
+    buf[0]=0;
+    for (int i=0; i<det_max; i++){
+        if (g_dets[i]){
+            
+            o+= snprintf(buf, len - o, "%d:%03d %03d ", i, g_dets[i], g_detlines[i]);
+        }
+    }
+    return o;
+}
+
 static int close_key() {
     pthread_key_delete(mysql_conn_key);
     return 0;
@@ -60,8 +95,9 @@ static void db_mysql_destructor(void *ptr) {
     MYSQL *conn = (MYSQL *)ptr;
     g_host->logmsg("db_mysql_destructor: closing thread-local MySQL connection");
     int res=0;
-    if (NULL !=conn)
+    if (NULL !=conn){
         mysql_close(conn);
+    }
 }
 static void make_key() {
     pthread_key_create(&mysql_conn_key, (void (*)(void *))db_mysql_destructor); // automatikus close
@@ -72,6 +108,7 @@ static int db_thread_init() {
 
     MYSQL *conn = mysql_init(NULL);
     if (NULL == conn) {
+        reportDet(det_init, __LINE__);
         g_host->logmsg("mysql_init() failed");
         return -1;
     }
@@ -82,6 +119,7 @@ static int db_thread_init() {
 static MYSQL *db_conn() {
     MYSQL *conn = (MYSQL *)pthread_getspecific(mysql_conn_key);
     if (conn == NULL) {
+        reportDet(det_connect, __LINE__);
         g_host->errormsg("mysql_conn() failed");
         return NULL;
     }
@@ -111,6 +149,7 @@ int db_open(MYSQL **conn) {
     }
 
     if (NULL == *conn) {
+        reportDet(det_connect, __LINE__);
         return -1;
     }
 
@@ -120,6 +159,7 @@ int db_open(MYSQL **conn) {
     char db_database[32];
     int db_port;
     if (!g_host){
+        reportDet(det_init, __LINE__);
         return -1;
     }
     db_connection_valid = 0;
@@ -129,11 +169,13 @@ int db_open(MYSQL **conn) {
     g_host->config_get_string("MYSQL", "db_database", db_database, 32, "geo");
     db_port = g_host->config_get_int("MYSQL", "db_port", 3306);
     if (mysql_real_connect(*conn, db_host, db_user, db_password, db_database, db_port, NULL, 0) == NULL) {
+        reportDet(det_connect, __LINE__);
         g_host->errormsg("mysql_real_connect(%s, %s, , %s, %d) failed: %s", db_host, db_user, db_database, db_port, mysql_error(*conn));
         pthread_setspecific(mysql_conn_key, NULL);
         return -1;
     }
     if (mysql_set_character_set(*conn, "utf8") != 0) {
+        reportDet(det_character_set, __LINE__);
         g_host->errormsg("mysql_set_character_set() failed: %s", mysql_error(*conn));
         return -1;
     }
@@ -148,10 +190,12 @@ int db_query(MYSQL *conn, const char *query) {
         db_open(&conn);
     }
     if (!db_connection_valid) {
+        reportDet(det_conn_invalid, __LINE__);
         g_host->logmsg("db_query(): attempted to use invalid connection");
         return -1;
     }
     if (mysql_query(conn, query)) {
+        reportDet(det_query, __LINE__);
         g_host->errormsg("mysql_query() failed: %s", mysql_error(conn));
         return -1;
     }
@@ -189,6 +233,7 @@ static void queue_clear() {
         queue_pop_all();
         sync_mutex_unlock(g_queue_control->mutex);
     }else{
+        reportDet(det_lock, __LINE__);
         errormsg("queue_clear lock failure");
     }
 }
@@ -206,10 +251,12 @@ static void queue_push(QueryRequest *req) {
             queue_size++;
             sync_cond_signal(g_queue_control->cond);
         } else {
+            reportDet(det_queue_full, __LINE__);
             g_host->logmsg("Queue is full, dropping request");
         }
         sync_mutex_unlock(g_queue_control->mutex);
     }else{
+        reportDet(det_lock, __LINE__);
         errormsg("queue_push lock failure");
     }
 }
@@ -224,23 +271,27 @@ void plugin_mysql_db_request_handler(DbQuery *query, QueryResultProc result_proc
 static void process_request(QueryRequest *req) {
     MYSQL *conn = db_conn();
     if (conn == NULL) {
+        reportDet(det_conn_invalid, __LINE__);
         g_host->logmsg("Failed to get MySQL connection");
         return;
     }
 
     DbQuery *dbq = req->query;
     if (!dbq) {
+        reportDet(det_query, __LINE__);
         g_host->logmsg("Internal query error.");
          return;
     }
 
     if (db_query(conn, dbq->query) != 0) {
+        reportDet(det_query, __LINE__);
         g_host->logmsg("Failed to execute query: %s", dbq->query);
         db_close(conn);
         return;
     }
     MYSQL_RES *result = mysql_store_result(conn);
     if (result == NULL) {
+        reportDet(det_result, __LINE__);
         g_host->logmsg("mysql_store_result() failed: %s", mysql_error(conn));
         db_close(conn);
         return;
@@ -273,10 +324,12 @@ void *mysql_thread_main(void *arg) {
         // yeah, the index may depends on implementation, but now 0...
         g_queue_control = &pc->thread.own_threads[0].control;
     }else{
+        reportDet(det_args, __LINE__);
         debugmsg("how is it possible?");
     }
     //just for sure, the code is under development...
     if (g_queue_control != &pc->thread.own_threads[0].control){
+        reportDet(det_args, __LINE__);
         errormsg("Sanity check failed. Developer issue, check the code !");
         g_queue_control = &pc->thread.own_threads[0].control;
     }
@@ -285,6 +338,7 @@ void *mysql_thread_main(void *arg) {
     control->keep_running = 1;
     MYSQL *conn = db_conn();
     if (db_open(&conn) != 0) {
+        reportDet(det_conn_invalid, __LINE__);
         g_host->logmsg("Failed to open MySQL connection");
     } else {
         while (control->keep_running) {
@@ -322,11 +376,17 @@ void *mysql_thread_main(void *arg) {
     g_host->thread.exit_own(pc);
     return NULL;
 }
+
+/**
+ * Plugin API init
+ */
 int plugin_init(PluginContext* pc, const PluginHostInterface *host) {
     g_host = host;
+    pc->stat.det_str_dump = plugin_det_str_dump;
     pc->db.request = plugin_mysql_db_request_handler;
     pc->http.request_handler = (void*) handle_mysql;
-    if (g_host->thread.create_own(pc, mysql_thread_main, "")){
+    if (g_host->thread.create_own(pc, mysql_thread_main, "mysql_queue")){
+        reportDet(det_init, __LINE__);
         g_host->logmsg("Failed to create MySQL thread");
         return PLUGIN_ERROR;
     }
@@ -344,6 +404,7 @@ int plugin_thread_init(PluginContext *ctx) {
 int plugin_thread_finish(PluginContext *ctx) {
     return db_thread_end();   // mandatory!
 }
+
 // Helper: Lookup user info by session_id
 static int get_user_info(MYSQL *conn, const char *session_id, int *user_id, char *nick, char *last_login, char *email, float *lat, float *lon, float *alt) {
     char query[256];

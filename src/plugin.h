@@ -64,6 +64,11 @@ typedef TerrainInfo (*get_terrain_info_t)(float, float);
 typedef int (*mapgen_init_t)(void);
 //function prototype for the mapgen finish
 typedef void (*mapgen_finish_t)(void);
+typedef struct{
+    int (*det_str_dump)(char* buf, int len);
+    int (*det_access)(int *size, int *counters, int *lines );
+    int (*stat_str_dump)(char* buf, int len);
+}StatInterface;
 
 /** MapContext
  * the map subsystem related api from host to the module */
@@ -89,6 +94,9 @@ typedef struct MapHostInterface{
 typedef struct{
     void (*register_http_route)(struct PluginContext* pc, int cout, const char *route[]);
     void (*register_control_route)(struct PluginContext* pc, int cout, const char *route[]);
+    int  (*get_plugin_count)(void);
+    struct PluginContext* (*get_plugin)(int id);
+    int (*server_dump_stat)(char *buf, int len);
 }ServerHostInterface;
 
 /** HTTP protocol specific host interface
@@ -307,6 +315,8 @@ typedef struct PluginContext{
     WsCapabilities ws_caps;
 
     // dynamic/optional functions, this is only available, when a plugin is already started.
+    // Statistics
+    StatInterface stat;
     // HTTP
     PluginHttpFunctions http;
     // WS

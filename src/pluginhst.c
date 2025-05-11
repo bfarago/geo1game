@@ -1,5 +1,5 @@
 /*
- * File:    plugin.c
+ * File:    pluginhst.c
  * Author:  Barna Faragó MYND-ideal ltd.
  * Created: 2025-05-06
  * 
@@ -38,6 +38,7 @@
 
 #define HOUSEKEEPER_LOCK_TIMEOUT_MS (20u) //  20ms
 #define PLUGIN_SHUTDOWN_TIMEOUT_MS (150u) // 150ms
+
 extern MapContext map_context;
 
 typedef struct {
@@ -51,6 +52,37 @@ int g_PluginCount = 0;
 PluginContext g_Plugins[MAX_PLUGIN];
 housekeeper_t g_housekeeper;
 
+// DEveloper's Test interface
+typedef enum{
+    det_args,
+    det_memory,
+    det_init, det_destroy,
+    det_lock, det_lock_timeout, det_unlock,
+    det_signal, det_broadcast,
+    det_wait, det_wait_timeout,
+    det_join,
+    det_file, det_dlopen, det_pluginapi,
+    det_max
+} detid;
+
+static unsigned char g_dets[det_max];
+static unsigned short g_detlines[det_max];
+
+static inline void reportDet(detid id, unsigned short line){
+    if (g_dets[id] < 255) g_dets[id]++;
+    g_detlines[id] = line;
+}
+int pluginhst_det_str_dump(char* buf, int len){
+    int o=0;
+    buf[0]=0;
+    for (int i=0; i<det_max; i++){
+        if (g_dets[i]){
+            
+            o+= snprintf(buf, len - o, "%d:%03d %03d ", i, g_dets[i], g_detlines[i]);
+        }
+    }
+    return o;
+}
 
 void plugin_start_timer(PCHANDLER pc, int interval, void (*callback)(PCHANDLER)){
     (void)pc;
@@ -74,8 +106,18 @@ PluginContext* get_plugin_context(const char *name){
             return &g_Plugins[i];
         }
     }
+    reportDet(det_args, __LINE__);
     return NULL;
 }
+
+int get_plugin_count(void){
+    return g_PluginCount;
+}
+
+PluginContext* get_plugincontext_by_id(int id){
+    return &g_Plugins[id];
+}
+
 /**
  * Disable plugin (used internnally, when load was not possible)
  */
@@ -126,7 +168,10 @@ void plugin_ownthread_exit(PluginContext *pc) {
 int plugin_register_ownthread(PluginContext *pc, pthread_t tid, const char* name){
     // check state here
     int tc= pc->thread.own_threads_count;
-    if (tc >= MAX_PLUGIN_OWN_THREADS) return -1;
+    if (tc >= MAX_PLUGIN_OWN_THREADS) {
+        reportDet(det_args, __LINE__);
+        return -1;
+    }
     for (int i = 0; i < tc; ++i) {
         if (pthread_equal((pthread_t)pc->thread.own_threads[i].thread, tid)) return 0; // already registered
     }
@@ -149,8 +194,11 @@ int plugin_register_ownthread(PluginContext *pc, pthread_t tid, const char* name
  */
 int plugin_create_ownthread(PluginContext *pc, plugin_thread_main_fn fn, const char* name) {
     pthread_t tid;
-    if (pthread_create(&tid, NULL, fn, (void*)pc) != 0)
+    if (pthread_create(&tid, NULL, fn, (void*)pc) != 0){
+        reportDet(det_args, __LINE__);
         return -1;
+    }
+    pthread_setname_np(tid, name);
     return plugin_register_ownthread(pc, tid, name);
 }
 
@@ -163,16 +211,18 @@ int plugin_wait_for_ownthreads(PluginContext *pc){
         for (int i=0; i< pc->thread.own_threads_count; i++){
             PluginOwnThreadInfo* pt =  &pc->thread.own_threads[i];
             PluginThreadControl* ct = &pt->control;
-            if (ct->keep_running){
+            if (ct->mutex){
                 ct->keep_running = 0;
                 if (sync_mutex_lock(ct->mutex, PLUGIN_SHUTDOWN_TIMEOUT_MS)){
                     int ret = sync_cond_broadcast(ct->cond);
                     if (ret){
+                        reportDet(det_broadcast, __LINE__);
                         debugmsg("pthread_cond_broadcast failed: %s", strerror(ret));
                         errors++;
                     }
                     sync_mutex_unlock(ct->mutex);
                 }else{
+                    reportDet(det_lock, __LINE__);
                     errors++;
                 }
             }
@@ -180,6 +230,7 @@ int plugin_wait_for_ownthreads(PluginContext *pc){
                 int res= pthread_join((pthread_t)pt->thread, NULL);
                 if (res){
                     debugmsg("pthread_joins failed: %s", strerror(res));
+                    reportDet(det_join, __LINE__);
                     errors++;
                 }
                 pt->thread = (sync_thread_t)0;
@@ -187,11 +238,13 @@ int plugin_wait_for_ownthreads(PluginContext *pc){
             }
             int res = sync_cond_destroy(ct->cond);
             if (res != 0) {
+                reportDet(det_destroy, __LINE__);
                 debugmsg("sync_cond_destroy failed: %s", strerror(res));
                 errors++;
             }
             res = sync_mutex_destroy(ct->mutex);
             if (res != 0) {
+                reportDet(det_destroy, __LINE__);
                 debugmsg("sync_mutex_destroy failed: %s", strerror(res));
                 errors++;
             }
@@ -213,6 +266,7 @@ int plugin_load(const char *name, int id){
 
     struct stat st;
     if (stat(filename, &st) != 0) {
+        reportDet(det_file, __LINE__);
         logmsg("Failed to stat plugin file: %s", filename);
         plugin_disable(pc);
         return -1;
@@ -232,6 +286,7 @@ int plugin_load(const char *name, int id){
     pc->handle = dlopen(filename, RTLD_LAZY|RTLD_NOLOAD);
     if (!pc->handle) pc->handle = dlopen(filename, RTLD_LAZY);
     if (!pc->handle) {
+        reportDet(det_dlopen, __LINE__);
         logmsg("Failed to load plugin: %s", filename);
         plugin_disable(pc);
         return -1;
@@ -242,18 +297,21 @@ int plugin_load(const char *name, int id){
     pc->id = id;
     pc->plugin_init = (plugin_init_t)dlsym(pc->handle, "plugin_init");
     if (!pc->plugin_init) {
-        logmsg("Failed to find plugin_init in %s", filename);
+//        reportDet(det_pluginapi, __LINE__);
+        debugmsg("Failed to find plugin_init in %s", filename);
         plugin_disable(pc);
         return -1;
     }
     pc->plugin_finish = (plugin_finish_t)dlsym(pc->handle, "plugin_finish");
     if (!pc->plugin_finish) {
+        reportDet(det_pluginapi, __LINE__);
         logmsg("Failed to find plugin_finish in %s", filename);
         plugin_disable(pc);
         return -1;
     }
     pc->plugin_register = (plugin_register_t)dlsym(pc->handle, "plugin_register"); 
     if (!pc->plugin_register) {
+        reportDet(det_pluginapi, __LINE__);
         logmsg("Failed to find plugin_register in %s", filename);
         plugin_disable(pc);
         return -1;
@@ -268,6 +326,7 @@ int plugin_load(const char *name, int id){
     //Init
     int retInit= pc->plugin_init(pc, &g_plugin_host);
     if (retInit < 0) {
+        reportDet(det_pluginapi, __LINE__);
         logmsg("Failed to initialize plugin: %s", filename);
         plugin_disable(pc);
         return -1;
@@ -294,6 +353,7 @@ int plugin_unload(int id){
                     ev = pc->plugin_event(pc, PLUGIN_EVENT_STANDBY, &evctx);
                 }
             } else {
+                reportDet(det_args, __LINE__);
                 logmsg("plugin_event pointer invalid or already dlclose()-d at %d:%s", id, pc->name);
             }
             if (ev != 0) {
@@ -321,12 +381,14 @@ int plugin_unload(int id){
             pc->plugin_event = NULL;
             pc->state = PLUGIN_STATE_UNLOADED;
         } else {
+            reportDet(det_args, __LINE__);
             logmsg("Plugin is not loaded, un-reachable code?: %d:%s", id, pc->name);
             pc->state = PLUGIN_STATE_NONE; // this would be a disabled state rather
             return -1;
         }
         return 0;
     } else {
+        reportDet(det_args, __LINE__);
         logmsg("Plugin not in a state to unload: %d:%s state:%d", id, pc->name, pc->state);
         return -1;
     }
@@ -341,6 +403,7 @@ int plugin_start(int id) {
 
     int res = sync_mutex_lock(g_housekeeper.lock, HOUSEKEEPER_LOCK_TIMEOUT_MS);
     if (res != 0) {
+        reportDet(det_lock_timeout, __LINE__);
         logmsg("plugin_start housekeeper lock timeout r:%s", res);
         return -1;
     }
@@ -355,6 +418,7 @@ int plugin_start(int id) {
                 }
             }
             if (pc->state != PLUGIN_STATE_INITIALIZED){
+                reportDet(det_init, __LINE__);
                 errormsg("load error");
                 sync_mutex_unlock(g_housekeeper.lock);
                 return -1;
@@ -363,6 +427,7 @@ int plugin_start(int id) {
         
         if (pc->thread_init){
             if (pc->thread_init(pc)) {
+                reportDet(det_init, __LINE__);
                 logmsg("Failed to initialize plugin thread: %s", pc->name);
                 sync_mutex_unlock(g_housekeeper.lock);
                 return -1;
@@ -383,6 +448,7 @@ void plugin_stop(int id) {
     if (pc->handle) {
         if (pc->thread_finish){
             if (pc->thread_finish(pc)) {
+                reportDet(det_destroy, __LINE__);
                 logmsg("Failed to finish plugin thread: %s", pc->name);
                 //return;
             }
@@ -397,6 +463,7 @@ void plugin_stop(int id) {
             sync_mutex_unlock(g_housekeeper.lock);
             //pthread_mutex_unlock(&plugin_housekeeper_mutex);
         }else{
+            reportDet(det_lock_timeout, __LINE__);
             logmsg("plugin_stop housekeeper lock timeout");
             //return -1; //but not used...
         }
@@ -406,6 +473,7 @@ void plugin_stop(int id) {
 void plugin_scan_and_register() {
     DIR *dir = opendir(g_geod_plugin_dir);
     if (!dir) {
+        reportDet(det_file, __LINE__);
         errormsg("Cannot open plugin directory: %s", g_geod_plugin_dir);
         return;
     }
@@ -438,6 +506,7 @@ void plugin_scan_and_register() {
                 if (rr == 0) {
                     debugmsg("Plugin registered: %d:%s", newid, pc->name);
                 } else {
+                    reportDet(det_pluginapi, __LINE__);
                     errormsg("Plugin registration failed: %d:%s", newid, pc->name);
                 }
             } else {
@@ -464,6 +533,7 @@ void housekeeper_plugins(time_t now ){
                     if (0 == res){
                         debugmsg("Plugin unloaded: %s", pc->name);
                     }else if (-1 == res) {
+                        reportDet(det_pluginapi, __LINE__);
                         errormsg("Plugin unload failed: %s", pc->name);
                     }else if (2 == res) {
                         debugmsg("Kept running, due to the plugin requested more time...");
@@ -515,14 +585,18 @@ void start_housekeeper() {
     g_housekeeper.mapgen_loaded = 0U;
     if (pthread_create(&g_housekeeper.thread_id, NULL, housekeeper_thread, NULL) != 0) {
         perror("Failed to create housekeeper thread");
+        reportDet(det_init, __LINE__);
         exit(1);
     }
+    pthread_setname_np(g_housekeeper.thread_id, "housekeeper");
 }
 
 void stop_housekeeper() {
     g_housekeeper.running = 0U;
     pthread_join(g_housekeeper.thread_id, NULL);
 }
+
+int server_dump_stat(char *buf, int len);
 
 /**
  * Plugins can access to the host through this fn pointer collection
@@ -548,7 +622,10 @@ const PluginHostInterface g_plugin_host = {
     },
     .server = {
         .register_http_route = register_http_routes,
-        .register_control_route = register_control_routes
+        .register_control_route = register_control_routes,
+        .get_plugin_count = get_plugin_count,
+        .get_plugin = get_plugincontext_by_id,
+        .server_dump_stat = server_dump_stat,
     },
     .http = {
         .send_response = send_response,

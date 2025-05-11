@@ -37,10 +37,10 @@ typedef enum{
     det_max
 } detid;
 
-unsigned char g_dets[det_max];
-unsigned short g_detlines[det_max];
+static unsigned char g_dets[det_max];
+static unsigned short g_detlines[det_max];
 
-void reportDet(detid id, unsigned short line){
+static inline void reportDet(detid id, unsigned short line){
     if (g_dets[id] < 255) g_dets[id]++;
     g_detlines[id] = line;
 }
@@ -89,6 +89,7 @@ int sync_mutex_destroy(sync_mutex_t *m) {
         if (res != 0) {
             reportDet(det_destroy, __LINE__);
         }
+        //m->native = NULL;
         free(m);
     }else{
         reportDet(det_args, __LINE__);
@@ -142,11 +143,14 @@ int sync_cond_broadcast(sync_cond_t *c) {
 int sync_cond_destroy(sync_cond_t *c) {
     int res=0;
     if (c) {
-        res=pthread_cond_destroy(&c->native);
-        if (res){
-            reportDet(det_destroy, __LINE__);
-        }
-        free(c);
+        //if (c->native){
+            res=pthread_cond_destroy(&c->native);
+            if (res){
+                reportDet(det_destroy, __LINE__);
+            }
+            //c->native=0;
+            free(c);
+        //}
     }else{
         reportDet(det_args, __LINE__);
     }

@@ -1,5 +1,11 @@
-/**
- * Plugin Host
+/*
+ * File:    pluginhst.h
+ * Author:  Barna Faragó MYND-ideal ltd.
+ * Created: 2025-05-10
+ * 
+ * Plugin Host API interface
+ * Key features:
+ *  registration, host and plugin side APIs
  */
 #ifndef PLUGINHST_H_
 #define PLUGINHST_H_
@@ -48,5 +54,5 @@ void plugin_scan_and_register();
 void start_housekeeper();
 void stop_housekeeper();
 void housekeeper_server_clients(time_t now );
-
+int pluginhst_det_str_dump(char* buf, int len);
 #endif // PLUGINHST_H_

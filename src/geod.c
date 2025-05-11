@@ -503,7 +503,46 @@ void stat_data_add(StatData *sd, int value){
         sd->a_sum5s = 0;
     }
 }
+int server_dump_stat(char *buf, int len){
+    int o = 0;
+    //o += snprintf(buf + o, len - o, "");
+    o += snprintf(buf + o, len - o, "Protocol |         Server:Port | alive  |   ok   | failed | exe [ms] |    cpu %%     |\r\n");
+    o += snprintf(buf + o, len - o, "---------+---------------------+--------+--------+--------+----------+--------------|\r\n");
+    for(int i=0; i < g_server_socket_count; i++) {
+        ServerSocket *ss = &g_server_sockets[i];
+        /*
+        int limit =300;
+        int count_alive = 0;
+        int count_finished = 0;
+        int count_failed = 0;
+        ContextServerData **csd_prev = &ss->first_ctx_data;
+        while (*csd_prev){
+            ContextServerData *csd = *csd_prev;
+            if (csd->cc.result_status == CTX_ERROR){
+                count_failed++;
+            }
+            if (csd->cc.socket_fd < 0){
+                count_finished++;
+                continue;
+            }
+            count_alive++;
+            if (--limit < 0) break;
+            csd_prev= &csd->next;
+            if (csd_prev == NULL) break;
 
+        }
+        */
+        o += snprintf(buf + o, len - o, "%8s |%15s:%-2d |%2d - %2d |%2d - %2d |%2d - %2d |%3d - %3d | %02.2f - %02.2f%% |\r\n",
+            ss->protocol->label, ss->server_ip, ss->port,
+            ss->stat_alive.min5sm,          ss->stat_alive.max5sm,
+            ss->stat_finished.min5sm,       ss->stat_finished.max5sm,
+            ss->stat_failed.min5sm,         ss->stat_failed.max5sm,
+            ss->stat_exectime.min5sm,       ss->stat_exectime.max5sm,
+            ss->stat_exectime.min5sm/50.0,  ss->stat_exectime.max5sm/50.0
+            );
+    }
+    return o;
+}
 void housekeeper_server_clients(time_t now ){
     (void)now; // suppress unused parameter warning (now is passed to housekeeper_server_clients 
     #if (0)
@@ -589,9 +628,50 @@ void close_ClientContext(ClientContext *ctx) {
                           (ctx->end_time.tv_nsec - ctx->start_time.tv_nsec) / 1e9;
 
 }
+int procfs_threads_str_dump(char* buf, size_t len){
+    int o = 0;
+    char path[MAX_PATH];
+    snprintf(path, MAX_PATH, "/proc/%d/task/", getpid());
+    DIR *dir = opendir(path);
+    if (dir) {
+        struct dirent *entry;
+        while ((entry = readdir(dir)) != NULL) {
+            if (entry->d_type != DT_DIR) continue;
+            if (!isdigit(entry->d_name[0])) continue;
 
+            char stat_path[MAX_PATH];
+            snprintf(stat_path, MAX_PATH, "/proc/%d/task/%s/stat", getpid(), entry->d_name);
+
+            FILE *fp = fopen(stat_path, "r");
+            if (fp) {
+                char comm[256], state;
+                int pid;
+                unsigned long utime, stime;
+                // Remove RSS, add priority and stack pointer (kstkesp)
+                // Parse from /proc/[pid]/task/[tid]/stat: https://man7.org/linux/man-pages/man5/proc.5.html
+                fscanf(fp, "%d (%255[^)]) %c", &pid, comm, &state);
+                for (int i = 0; i < 11; i++) fscanf(fp, "%*s"); // skip to utime
+                fscanf(fp, "%lu %lu", &utime, &stime);
+                for (int i = 0; i < 2; i++) fscanf(fp, "%*s"); // skip cutime, cstime
+                unsigned long priority;
+                fscanf(fp, "%lu", &priority);
+                for (int i = 0; i < 12; i++) fscanf(fp, "%*s"); // skip to kstkesp
+                unsigned long kstkesp = 0;
+                fscanf(fp, "%lu", &kstkesp);
+                fclose(fp);
+
+                o += snprintf(buf + o, len - o, "\nTID: %s [%s] State: %c CPU: %lu+%lu Priority: %lu Stack: 0x%lx",
+                    entry->d_name, comm, state, utime, stime, priority, kstkesp);
+            }
+        }
+        o += snprintf(buf + o, len - o, "\n");
+        closedir(dir);
+    }
+    return o;
+}
 void *onProcessControl(void *arg) {
     ClientContext *ctx = (ClientContext *)arg;
+    
     // pthread_setname_np("control");
     int keep_processing = 1;
     while (keep_processing && keep_running) {
@@ -622,6 +702,18 @@ void *onProcessControl(void *arg) {
                     char dump[BUF_SIZE];
                     sync_det_str_dump( dump, BUF_SIZE);
                     dprintf(ctx->socket_fd, "sync: %s\n", dump);
+                    pluginhst_det_str_dump(dump, BUF_SIZE);
+                    dprintf(ctx->socket_fd, "host: %s\n", dump);
+                    for(int i=0; i<g_PluginCount; i++){
+                        PluginContext *p= &g_Plugins[i];
+                        if (p->stat.det_str_dump){
+                            p->stat.det_str_dump(dump, BUF_SIZE);
+                            dprintf(ctx->socket_fd, "plugin %d (%s): %s\n", p->id, p->name, dump);
+                        }
+                    }
+                    procfs_threads_str_dump(dump, BUF_SIZE);
+                    dprintf(ctx->socket_fd, "threads: %s\n", dump);
+        
                 }else if (strcasecmp(line, "debug") == 0) {
                     g_debug_msg_enabled = (g_debug_msg_enabled)?0:1;
                     dprintf(ctx->socket_fd, "debug: %s\n", g_debug_msg_enabled?"on":"off");
@@ -977,8 +1069,11 @@ int main(int argc, char** argv)
                     ContextServerData *csd = sp->on_accept(ss, client_fd, &client_addr);
                     if (csd){
                         ClientContext *ctx = &csd->cc;
+                        char tname[16];
+                        snprintf(tname, 16, "C%d_%s", i, ctx->client_ip);
                         clock_gettime(CLOCK_MONOTONIC, &ctx->start_time);
                         pthread_create(&csd->thread_id, NULL, sp->on_process, ctx);
+                        pthread_setname_np(csd->thread_id, tname);
                         pthread_detach(csd->thread_id);
                     }else{
                         // rejected by the protocol specific on_accept function based on rules..,

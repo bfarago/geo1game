@@ -17,7 +17,7 @@ GEOD_SOURCES="$GEOD_SOURCES geod.c "
 $CC $CFLAGS -o geod $GEOD_SOURCES -lpng -ldl -lpthread -lm -lssl -lcrypto -ljson-c 2>>$LOG
 
 # Build mapgen C extension
-$CC -std=c99 -O3 -march=native -ffast-math -funroll-loops -mfma -mavx2 -shared -fPIC -o libmapgen_c.so mapgen.c perlin3d.c 2>>$LOG
+$CC -std=c99 -O3 -march=native -ffast-math -funroll-loops -mfma -mavx2 -shared -fPIC -o libmapgen_c.so mapgen/mapgen.c mapgen/perlin3d.c 2>>$LOG
 
 #
 # PLUGINS
@@ -26,7 +26,7 @@ $CC -std=c99 -O3 -march=native -ffast-math -funroll-loops -mfma -mavx2 -shared -
 # CGI plugin
 $CC $CFLAGS $SHARED_FLAGS $INCLUDE_FLAGS -o cgi.so plugin_cgi/plugin_cgi.c 2>>$LOG
 # Control plugin
-$CC $CFLAGS $SHARED_FLAGS $INCLUDE_FLAGS -o control.so plugin_control/plugin_control.c 2>>$LOG
+$CC $CFLAGS $SHARED_FLAGS $INCLUDE_FLAGS -o control.so plugin_control/plugin_control.c sync.c 2>>$LOG
 # WS plugin
 $CC $CFLAGS $SHARED_FLAGS $INCLUDE_FLAGS -o ws.so plugin_ws/plugin_ws.c plugin_ws/ws.c -lssl -lcrypto -ljson-c 2>>$LOG
 # HTTP Hello plugin
