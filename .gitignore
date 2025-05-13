@@ -180,5 +180,6 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 etc/geod/geod.ini
+src/test.ini
 *.pid
 core
