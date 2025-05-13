@@ -1,3 +1,10 @@
+/**
+ * File:    plugin_control.c
+ * Author:  Barna Faragó MYND-ideal ltd.
+ * Created: 2025-05-10
+ * 
+ * CONTROL (CLI) Protocol ANSI terminal VT220, VT100
+ */
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,24 +23,64 @@
 
 #include "sync.h"
 #include "../plugin.h"
+
 // globals
 
 #define VT100_SLEEP_TIME_MS (50) // 50ms
-#define VT100_SLEEP_TIME_US (VT100_SLEEP_TIME_MS * 1000)
-
 
 const PluginHostInterface *g_host;
 const char* g_control_routes[2]={"help", "vt100"};
 int g_control_routess_count = 2;
 
+/**
+ *  Process statistics dump from /proc/self/stat and /proc/self/status
+ */
+void procfs_process_str_dump(char *buf, size_t len) {
+    unsigned long vmrss = 0, vmsize = 0, vmdata = 0, vmlib = 0;
+    FILE *status = fopen("/proc/self/status", "r");
+    if (status) {
+        char line[256];
+        while (fgets(line, sizeof(line), status)) {
+            if (sscanf(line, "VmRSS: %lu kB", &vmrss) == 1) continue;
+            if (sscanf(line, "VmSize: %lu kB", &vmsize) == 1) continue;
+            if (sscanf(line, "VmData: %lu kB", &vmdata) == 1) continue;
+            if (sscanf(line, "VmLib: %lu kB", &vmlib) == 1) continue;
+        }
+        fclose(status);
+    }
+
+    FILE *fp = fopen("/proc/self/stat", "r");
+    if (!fp) return;
+
+    int pid;
+    char comm[256];
+    char state;
+    unsigned long utime, stime, priority;
+    fscanf(fp, "%d (%255[^)]) %c", &pid, comm, &state);
+    for (int i = 0; i < 11; i++) fscanf(fp, "%*s");
+    fscanf(fp, "%lu %lu", &utime, &stime); // utime, stime
+    for (int i = 0; i < 2; i++) fscanf(fp, "%*s");
+    fscanf(fp, "%lu", &priority); // priority
+    fclose(fp);
+
+    snprintf(buf, len,
+        "PID    | Name             |St.|   CPU     |Pri |  VmRSS |  VmLib | VmData |\r\n"
+        "-------+------------------+---+-----------+----+--------+--------+--------+\r\n"
+        "%-6d | %-16s | %c | %4lu+%-4lu | %-2lu | %6lu | %6lu | %6lu |\r\n\r\n",
+        pid, comm, state, utime, stime, priority, vmrss, vmlib, vmdata);
+}
+
+/**
+ * Thread statistics from procfs
+ */
 int procfs_threads_str_dump(char* buf, size_t len){
     int o = 0;
     char path[MAX_PATH];
     snprintf(path, MAX_PATH, "/proc/%d/task/", getpid());
     DIR *dir = opendir(path);
     if (dir) {
-        o += snprintf(buf + o, len - o, "TID    | Name           |St.|  CPU  |Pri| Stack |\r\n");
-        o += snprintf(buf + o, len - o, "-------+----------------+---+-------+---+-------+\r\n");
+        o += snprintf(buf + o, len - o, "TID    | Name             | St.|   CPU     |Pri |   Stack    |\r\n");
+        o += snprintf(buf + o, len - o, "-------+------------------+----+-----------+----+------------+\r\n");
         struct dirent *entry;
         while ((entry = readdir(dir)) != NULL) {
             if (entry->d_type != DT_DIR) continue;
@@ -60,7 +107,7 @@ int procfs_threads_str_dump(char* buf, size_t len){
                 fscanf(fp, "%lu", &kstkesp);
                 fclose(fp);
 
-                o += snprintf(buf + o, len - o, "%-6s |%-16s| %c | %-2lu+%-2lu | %lu | 0x%04lx|\r\n",
+                o += snprintf(buf + o, len - o, "%-6s | %-16s | %c  | %4lu+%-4lu | %-2lu | 0x%08lx |\r\n",
                     entry->d_name, comm, state, utime, stime, priority, kstkesp);
             }
         }
@@ -79,24 +126,62 @@ static const char *g_state_labels[PLUGIN_STATE_MAX] ={ // "0ulLIsRS7";
     [PLUGIN_STATE_SHUTTING_DOWN] = "Shut down",
     [PLUGIN_STATE_DISABLED] = "disabled"
 };
+
+/**
+ * Plugin statistics
+ */
 void plugins_str_dump(char *buf, int len){
     int o=0;
+    unsigned long now = time(NULL);
     int pn = g_host->server.get_plugin_count();
-    o += snprintf(buf + o, len - o, "Id | Plugin name    | State    |\r\n");
-    o += snprintf(buf + o, len - o, "---+----------------+----------+\r\n");
+    o += snprintf(buf + o, len - o, "Id | Plugin name    | State    | Use | Last | Det\r\n");
+    o += snprintf(buf + o, len - o, "---+----------------+----------+-----+------+-----\r\n");
     for (int i=0 ; i<pn; i++){
         PluginContext *p= g_host->server.get_plugin(i);
         if (p->state == PLUGIN_STATE_DISABLED) continue;
         
-        o += snprintf(buf + o, len - o, "%-2d |%-16s|%-10s|", i, p->name, g_state_labels[p->state] );
+        o += snprintf(buf + o, len - o, "%-2d |%-16s|%-10s|%5d|", i, p->name, g_state_labels[p->state], p->used_count );
+
+        if (p->last_used){
+            int dif = now - p->last_used;
+            if (dif<120){
+                o += snprintf(buf + o, len - o, "%4d s|", dif );
+            }else if (dif<7200){
+                o += snprintf(buf + o, len - o, "%4d m|", dif/60 );
+            }else{
+                o += snprintf(buf + o, len - o, "%4d h|", dif/3600 );
+            }
+        }
+
         if (p->stat.det_str_dump){
             o += p->stat.det_str_dump(buf+o, len - o);
+        }else{
+            o += snprintf(buf + o, len - o, " n/a");
         }
+        if (p->stat.stat_str_dump){
+            o += p->stat.stat_str_dump(buf+o, len - o);
+        }
+        for (int i=0; i< p->thread.own_threads_count; i++){
+            PluginOwnThreadInfo *pi = &p->thread.own_threads[i];
+            o += snprintf(buf + o, len - o, " %d:%s %d/%d %p", i, pi->name, pi->running, pi->control.keep_running, pi->thread);
+        }
+        if (p->handle){
+            o += snprintf(buf + o, len - o, " 0x%08lx",(unsigned long) p->handle);
+        }
+    
         o += snprintf(buf + o, len - o, "\r\n");
     }
 }
+
+/**
+ * Generate statistics
+ */
 void genStat(int fd){
     char buf[BUF_SIZE];
+    procfs_process_str_dump(buf, BUF_SIZE);
+    dprintf(fd, "\r\nProcess statistics\r\n%s", buf);
+    g_host->server.server_det_str_dump(buf, BUF_SIZE);
+    dprintf(fd, "Host Det:%s\r\n", buf);
     procfs_threads_str_dump(buf, BUF_SIZE);
     dprintf(fd, "Thread statistics\r\n%s", buf);
     plugins_str_dump(buf, BUF_SIZE);
@@ -104,6 +189,22 @@ void genStat(int fd){
     g_host->server.server_dump_stat(buf, BUF_SIZE);
     dprintf(fd, "\r\nProtocol statistics\r\n%s", buf);
 }
+
+/**
+ * Clears statistics
+ */
+void stat_clear(){
+    int pn = g_host->server.get_plugin_count();
+    for (int i=0 ; i<pn; i++){
+        PluginContext *p= g_host->server.get_plugin(i);
+        if (p->stat.stat_clear) p->stat.stat_clear();
+    }
+    g_host->server.server_stat_clear();
+}
+
+/**
+ * Control protocol (CLI) handler
+ */
 void pcontrol_handler(PluginContext *pc, ClientContext *ctx, char* cmd, int argc, char **argv)
 {
     (void)pc;
@@ -126,10 +227,10 @@ void pcontrol_handler(PluginContext *pc, ClientContext *ctx, char* cmd, int argc
         //g_host->debugmsg("FD mode: 0x%x", st.st_mode);
         // Kezdeményezzük a Telnet protokoll tárgyalást a karakterenkénti küldéshez
         unsigned char telnet_negotiation[] = {
-            255, 251, 1,   // IAC WILL ECHO (mi echo-znánk, de most inkább csak tárgyaljuk)
+            255, 251, 1,   // IAC WILL ECHO
             255, 251, 3,   // IAC WILL SUPPRESS-GO-AHEAD
-            255, 253, 1,   // IAC DO ECHO (kliens echo-zza vissza nekünk — kikapcsolható)
-            255, 253, 3    // IAC DO SUPPRESS-GO-AHEAD (kliens character-at-a-time módra áll)
+            255, 253, 1,   // IAC DO ECHO
+            255, 253, 3    // IAC DO SUPPRESS-GO-AHEAD
         };
         send(ctx->socket_fd, telnet_negotiation, sizeof(telnet_negotiation), 0);
 
@@ -214,11 +315,15 @@ void pcontrol_handler(PluginContext *pc, ClientContext *ctx, char* cmd, int argc
                                     if (strcmp(line, "q") == 0 || strcmp(line, "quit") == 0) {
                                         ptc->keep_running = 0;
                                         break;
+                                    }else if (strcmp(line, "c") == 0 || strcmp(line, "clear") == 0) {
+                                        stat_clear();
+                                        screen_refresh = 1;
                                     }
                                     line[0] = '\0';
                                     line_len = 0;
                                     cursor_pos = 0;
                                     dprintf(ctx->socket_fd, "> ");
+                                    pc->last_used = time(0);
                                 } else if (c == 127 || c == '\b') {
                                     if (cursor_pos > 0) {
                                         memmove(&line[cursor_pos - 1], &line[cursor_pos], line_len - cursor_pos);
@@ -318,7 +423,7 @@ void pcontrol_handler(PluginContext *pc, ClientContext *ctx, char* cmd, int argc
                 }
             } else if (ret == 0) {
                 tick++;
-                if (tick % 20 == 0) {
+                if (tick % 40 == 0) {
                     screen_refresh =1;
                 }
                 if (ansi_state == STATE_NORMAL) {
@@ -340,7 +445,7 @@ void pcontrol_handler(PluginContext *pc, ClientContext *ctx, char* cmd, int argc
             }
         }
         dprintf(ctx->socket_fd, "\x1b[12h");  // DECSET 12 – Enable local echo
-        // Telnet protokoll beállítások visszavonása
+        // Telnet protokoll reset to echo mode
         unsigned char telnet_restore[] = {
             255, 252, 1,  // WONT ECHO
             255, 252, 3,  // WONT SUPPRESS-GO-AHEAD
@@ -358,6 +463,7 @@ void pcontrol_handler(PluginContext *pc, ClientContext *ctx, char* cmd, int argc
     }
     return;
 }
+
 int plugin_register(PluginContext *pc, const PluginHostInterface *host) {
     (void)pc;
     g_host = host;
@@ -376,17 +482,20 @@ int plugin_thread_finish(PluginContext *ctx) {
     // this will be run for each connection, when finished.
     return 0;
 }
+
 int plugin_init(PluginContext* pc, const PluginHostInterface *host) {
     (void)pc;
     g_host = host;
     pc->control.request_handler = pcontrol_handler;
     return PLUGIN_SUCCESS;
 }
+
 void plugin_finish(PluginContext* pc) {
     (void)pc;
     // Will runs once, when plugin unloaded.
     pc->http.request_handler = NULL;
 }
+
 // Plugin event handler implementation
 int plugin_event(PluginContext *pc, PluginEventType event, const PluginEventContext* ctx) {
     (void)pc;

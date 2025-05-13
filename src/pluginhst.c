@@ -37,7 +37,8 @@
 #include "pluginhst.h"
 
 #define HOUSEKEEPER_LOCK_TIMEOUT_MS (20u) //  20ms
-#define PLUGIN_SHUTDOWN_TIMEOUT_MS (150u) // 150ms
+#define PLUGIN_SHUTDOWN_TIMEOUT_MS (100u) // 100ms
+#define PLUGIN_SHUTDOWN_MAX_RETRY (5u)    // max 5*100ms
 
 extern MapContext map_context;
 
@@ -71,6 +72,11 @@ static unsigned short g_detlines[det_max];
 static inline void reportDet(detid id, unsigned short line){
     if (g_dets[id] < 255) g_dets[id]++;
     g_detlines[id] = line;
+}
+void pluginhst_stat_clear(void){
+    sync_det_clear();
+    memset(g_dets, 0, sizeof(g_dets));
+    memset(g_detlines, 0, sizeof(g_detlines));
 }
 int pluginhst_det_str_dump(char* buf, int len){
     int o=0;
@@ -128,34 +134,52 @@ void plugin_disable(PluginContext *pc){
     }
     pc->state = PLUGIN_STATE_DISABLED;
 }
-
+int plugin_ownthread_find(PluginContext *pc, sync_thread_t tid){
+    for (int i = 0; i < pc->thread.own_threads_count; ++i) {
+        PluginOwnThreadInfo *ti = &pc->thread.own_threads[i];
+        if (pthread_equal((pthread_t)ti->thread, (pthread_t)tid)) {
+            return i;
+        }
+    }
+    return -1;
+}
 /**
  * Plugins worker thread shall call this function when the 
  * thread started, to signalize it is running.
+ * Shall be called from the worker thread!
  */
 void plugin_ownthread_enter(PluginContext *pc) {
-    pthread_t tid = pthread_self();
-    for (int i = 0; i < pc->thread.own_threads_count; ++i) {
-        PluginOwnThreadInfo *ti = &pc->thread.own_threads[i];
-        if (pthread_equal((pthread_t)ti->thread, tid)) {
-            ti->running = 1;
-            return;
+    sync_thread_t tid = (sync_thread_t) pthread_self();
+    pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+    pthread_setcanceltype(PTHREAD_CANCEL_DEFERRED, NULL);
+    int index= plugin_ownthread_find(pc, tid);
+    if (index >= 0){
+        PluginOwnThreadInfo *ti = &pc->thread.own_threads[index];
+        if (ti->running){
+            debugmsg("thread already running?");
         }
+        ti->running = 1;
+    } else {
+        debugmsg("thread not found on enter");
     }
 }
 
 /**
  * plugin worker thread shall call this function at the end of the
  * thread, to signalize the thread is not running anymore.
+ * Shall be called from the worker thread.
  */
 void plugin_ownthread_exit(PluginContext *pc) {
-    pthread_t tid = pthread_self();
-    for (int i = 0; i < pc->thread.own_threads_count; ++i) {
-        PluginOwnThreadInfo *ti= &pc->thread.own_threads[i];
-        if (pthread_equal((pthread_t)ti->thread, tid)) {
-            ti->running = 0;
-            return;
+    sync_thread_t tid = (sync_thread_t) pthread_self();
+    int index= plugin_ownthread_find(pc, tid);
+    if (index >= 0){
+        PluginOwnThreadInfo *ti = &pc->thread.own_threads[index];
+        if (!ti->running){
+            debugmsg("thread already stopped?");
         }
+        ti->running = 0;
+    } else {
+        debugmsg("thread not found on exit");
     }
 }
 
@@ -207,25 +231,48 @@ int plugin_create_ownthread(PluginContext *pc, plugin_thread_main_fn fn, const c
  */
 int plugin_wait_for_ownthreads(PluginContext *pc){
     int errors = 0;
+    int retry = PLUGIN_SHUTDOWN_MAX_RETRY;
     if (pc->thread.own_threads_count){
+        do{
+            errors=0;
+            for (int i=0; i< pc->thread.own_threads_count; i++){
+                PluginOwnThreadInfo* pt =  &pc->thread.own_threads[i];
+                PluginThreadControl* ct = &pt->control;
+                if (ct->mutex){
+                    ct->keep_running = 0;
+                    if (sync_mutex_lock(ct->mutex, PLUGIN_SHUTDOWN_TIMEOUT_MS)){
+                        int ret = sync_cond_broadcast(ct->cond);
+                        if (ret){
+                            reportDet(det_broadcast, __LINE__);
+                            debugmsg("pthread_cond_broadcast failed: %s", strerror(ret));
+                            errors++;
+                        }
+                        sync_mutex_unlock(ct->mutex);
+                    } else {
+                        reportDet(det_lock, __LINE__);
+                        errors++;
+                    }
+                }
+            }
+            if (--retry <=0) break;
+        }while (errors);
+        if (retry <= 0) {
+            debugmsg("plugin_wait_for_ownthreads: exceeded max retry, attempting pthread_cancel");
+            for (int i = 0; i < pc->thread.own_threads_count; i++) {
+                PluginOwnThreadInfo* pt = &pc->thread.own_threads[i];
+                if (pt->running && pt->thread != 0) {
+                    int cancel_res = pthread_cancel((pthread_t)pt->thread);
+                    if (cancel_res != 0) {
+                        errormsg("pthread_cancel failed on thread %d: %s", i, strerror(cancel_res));
+                    } else {
+                        debugmsg("pthread_cancel issued for thread %d", i);
+                    }
+                }
+            }
+        }
         for (int i=0; i< pc->thread.own_threads_count; i++){
             PluginOwnThreadInfo* pt =  &pc->thread.own_threads[i];
             PluginThreadControl* ct = &pt->control;
-            if (ct->mutex){
-                ct->keep_running = 0;
-                if (sync_mutex_lock(ct->mutex, PLUGIN_SHUTDOWN_TIMEOUT_MS)){
-                    int ret = sync_cond_broadcast(ct->cond);
-                    if (ret){
-                        reportDet(det_broadcast, __LINE__);
-                        debugmsg("pthread_cond_broadcast failed: %s", strerror(ret));
-                        errors++;
-                    }
-                    sync_mutex_unlock(ct->mutex);
-                }else{
-                    reportDet(det_lock, __LINE__);
-                    errors++;
-                }
-            }
             if (pt->running){
                 int res= pthread_join((pthread_t)pt->thread, NULL);
                 if (res){
@@ -597,7 +644,7 @@ void stop_housekeeper() {
 }
 
 int server_dump_stat(char *buf, int len);
-
+void server_stat_clear(void);
 /**
  * Plugins can access to the host through this fn pointer collection
  */
@@ -626,6 +673,8 @@ const PluginHostInterface g_plugin_host = {
         .get_plugin_count = get_plugin_count,
         .get_plugin = get_plugincontext_by_id,
         .server_dump_stat = server_dump_stat,
+        .server_det_str_dump = pluginhst_det_str_dump,
+        .server_stat_clear = server_stat_clear
     },
     .http = {
         .send_response = send_response,

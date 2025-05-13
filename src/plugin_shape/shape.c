@@ -1,3 +1,10 @@
+/**
+ * File:    shape.c
+ * Author:  Barna Faragó MYND-ideal ltd.
+ * Created: 2025-05-10
+ * 
+ * Shape
+ */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

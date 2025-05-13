@@ -1,4 +1,8 @@
 /**
+ * File:    plugin_region.c
+ * Author:  Barna Faragó MYND-ideal ltd.
+ * Created: 2025-05-02
+ * 
  * @file plugin_region.c
  * @brief Region table
  */
@@ -14,6 +18,7 @@
 
 #define MAP_API_ENABLED 1
 #define REGIONS_BINFILE_ENABLED 1
+
 void handle_map_json(PluginContext *pc, ClientContext *ctx, RequestParams *params) ;
 void handle_region_status(PluginContext *pc, ClientContext *ctx, RequestParams *params) ;
 void handle_regions_chunk_json(PluginContext *pc, ClientContext *ctx, RequestParams *params);

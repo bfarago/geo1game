@@ -1,3 +1,11 @@
+/**
+ * File:    plugin_image.c
+ * Author:  Barna Faragó MYND-ideal ltd.
+ * Created: 2025-05-02
+ * 
+ * Image plugin
+ * 
+ */ 
 #include "image.h"
 #include "plugin.h"
 #define _GNU_SOURCE

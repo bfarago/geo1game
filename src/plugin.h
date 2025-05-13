@@ -68,6 +68,7 @@ typedef struct{
     int (*det_str_dump)(char* buf, int len);
     int (*det_access)(int *size, int *counters, int *lines );
     int (*stat_str_dump)(char* buf, int len);
+    void (*stat_clear)(void);
 }StatInterface;
 
 /** MapContext
@@ -97,6 +98,8 @@ typedef struct{
     int  (*get_plugin_count)(void);
     struct PluginContext* (*get_plugin)(int id);
     int (*server_dump_stat)(char *buf, int len);
+    int (*server_det_str_dump)(char *buf, int len);
+    void (*server_stat_clear)(void);
 }ServerHostInterface;
 
 /** HTTP protocol specific host interface

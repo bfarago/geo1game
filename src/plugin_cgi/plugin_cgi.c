@@ -1,4 +1,8 @@
 /**
+ * File:    plugin_cgi.c
+ * Author:  Barna Faragó MYND-ideal ltd.
+ * Created: 2025-05-02
+ * 
  * CGI Client plugin
  */
 #define _GNU_SOURCE

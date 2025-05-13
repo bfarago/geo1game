@@ -62,7 +62,7 @@ mv shape.so $PLUGIN_DIR/shape.so
 mv db_mysql.so $PLUGIN_DIR/db_mysql.so
 mv db_sqlite.so $PLUGIN_DIR/db_sqlite.so
 mv geod $BIN_DIR/geod
-service gepd start
+service geod start
 fi
 
 if [[ "$1" == "vscode" ]]; then

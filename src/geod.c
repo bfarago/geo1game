@@ -503,11 +503,15 @@ void stat_data_add(StatData *sd, int value){
         sd->a_sum5s = 0;
     }
 }
+void server_stat_clear(void){
+    sync_det_clear();
+    pluginhst_stat_clear();
+}
 int server_dump_stat(char *buf, int len){
     int o = 0;
     //o += snprintf(buf + o, len - o, "");
-    o += snprintf(buf + o, len - o, "Protocol |         Server:Port | alive  |   ok   | failed | exe [ms] |    cpu %%     |\r\n");
-    o += snprintf(buf + o, len - o, "---------+---------------------+--------+--------+--------+----------+--------------|\r\n");
+    o += snprintf(buf + o, len - o, "Protocol |         Server:Port | alive  |   ok   | failed | exe [ms] |     cpu %%     |\r\n");
+    o += snprintf(buf + o, len - o, "---------+---------------------+--------+--------+--------+----------+---------------|\r\n");
     for(int i=0; i < g_server_socket_count; i++) {
         ServerSocket *ss = &g_server_sockets[i];
         /*
@@ -532,7 +536,7 @@ int server_dump_stat(char *buf, int len){
 
         }
         */
-        o += snprintf(buf + o, len - o, "%8s |%15s:%-2d |%2d - %2d |%2d - %2d |%2d - %2d |%3d - %3d | %02.2f - %02.2f%% |\r\n",
+        o += snprintf(buf + o, len - o, "%8s |%15s:%-2d |%2d - %2d |%2d - %2d |%2d - %2d |%3d - %3d | %5.2f - %5.2f |\r\n",
             ss->protocol->label, ss->server_ip, ss->port,
             ss->stat_alive.min5sm,          ss->stat_alive.max5sm,
             ss->stat_finished.min5sm,       ss->stat_finished.max5sm,

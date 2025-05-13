@@ -1,3 +1,10 @@
+/**
+ * File:    shape.h
+ * Author:  Barna Faragó MYND-ideal ltd.
+ * Created: 2025-05-10
+ * 
+ * Shape
+ */
 #ifndef SHAPE_H
 #define SHAPE_H
 

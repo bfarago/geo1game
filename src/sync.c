@@ -1,5 +1,5 @@
 /*
- * File:    sync.h
+ * File:    sync.c
  * Author:  Barna Faragó MYND-ideal ltd.
  * Created: 2025-05-02
  * 
@@ -54,6 +54,10 @@ int sync_det_str_dump(char* buf, int len){
         }
     }
     return o;
+}
+void sync_det_clear(){
+    memset(g_dets, 0, sizeof(g_dets));
+    memset(g_detlines, 0, sizeof(g_detlines));
 }
 struct sync_mutex_t {
     pthread_mutex_t native;

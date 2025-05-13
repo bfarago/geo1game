@@ -1,4 +1,8 @@
 /**
+ * File:    plugin_mysql.c
+ * Author:  Barna Faragó MYND-ideal ltd.
+ * Created: 2025-05-02
+ * 
  * MYSQL Client plugin
  */
 #define _GNU_SOURCE
@@ -79,13 +83,15 @@ int plugin_det_str_dump(char* buf, int len){
     buf[0]=0;
     for (int i=0; i<det_max; i++){
         if (g_dets[i]){
-            
             o+= snprintf(buf, len - o, "%d:%03d %03d ", i, g_dets[i], g_detlines[i]);
         }
     }
+    o+=sync_det_str_dump(buf+o, len-o);
     return o;
 }
-
+void plugin_stat_clear(){
+    sync_det_clear();
+}
 static int close_key() {
     pthread_key_delete(mysql_conn_key);
     return 0;
@@ -337,6 +343,7 @@ void *mysql_thread_main(void *arg) {
     PluginThreadControl *control= g_queue_control;
     control->keep_running = 1;
     MYSQL *conn = db_conn();
+    int tick =0;
     if (db_open(&conn) != 0) {
         reportDet(det_conn_invalid, __LINE__);
         g_host->logmsg("Failed to open MySQL connection");
@@ -365,15 +372,22 @@ void *mysql_thread_main(void *arg) {
                 }
                 if (ETIMEDOUT == retWait){
                     // additionally do some home work...
+                    tick++;
+                    if (0==tick % 10){
+                        // g_host->debugmsg("mysql thread idle");
+                    }
                 }
             }else{
+                g_host->debugmsg("main mysql thread was not able to acquire lock");
                 sleep(1); //retry later, or wait until the thread is running actually...
             }
         }
         db_close(conn);
     }
+    g_host->debugmsg("main loop left");
     db_thread_end();
     g_host->thread.exit_own(pc);
+    g_host->debugmsg("Thread left");
     return NULL;
 }
 
@@ -383,6 +397,7 @@ void *mysql_thread_main(void *arg) {
 int plugin_init(PluginContext* pc, const PluginHostInterface *host) {
     g_host = host;
     pc->stat.det_str_dump = plugin_det_str_dump;
+    pc->stat.stat_clear = plugin_stat_clear;
     pc->db.request = plugin_mysql_db_request_handler;
     pc->http.request_handler = (void*) handle_mysql;
     if (g_host->thread.create_own(pc, mysql_thread_main, "mysql_queue")){
@@ -396,6 +411,9 @@ void plugin_finish(PluginContext* pc) {
     // pc->thread.control.keep_running = 0; // it is already done
     g_queue_control = NULL; // forget the provider side
     pc->http.request_handler = NULL;
+    pc->stat.stat_clear = NULL;
+    pc->stat.det_str_dump= NULL;
+    pc->stat.det_str_dump=NULL;
 }
 int plugin_thread_init(PluginContext *ctx) {
     return db_thread_init();  // mandatory!

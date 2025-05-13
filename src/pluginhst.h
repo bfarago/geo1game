@@ -55,4 +55,5 @@ void start_housekeeper();
 void stop_housekeeper();
 void housekeeper_server_clients(time_t now );
 int pluginhst_det_str_dump(char* buf, int len);
+void pluginhst_stat_clear(void);
 #endif // PLUGINHST_H_
