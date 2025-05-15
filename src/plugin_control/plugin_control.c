@@ -5,6 +5,7 @@
  * 
  * CONTROL (CLI) Protocol ANSI terminal VT220, VT100
  */
+// --- Field formatting model header ---
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,23 +21,143 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <ctype.h>
+#include <stdarg.h>
 
 #include "sync.h"
+#include "data_table.h"
 #include "../plugin.h"
+#include "cmd.h"
+
 
 // globals
 
 #define VT100_SLEEP_TIME_MS (50) // 50ms
 
-const PluginHostInterface *g_host;
-const char* g_control_routes[2]={"help", "vt100"};
-int g_control_routess_count = 2;
+const PluginHostInterface *g_host = NULL;
+
+static const char* g_http_routes[2]={"/stat.html", "/stat.json"};
+static const int g_http_routes_count = 2;
+typedef enum {
+    CMD_QUIT = 0,
+    CMD_SET_DEBUG,
+    CMD_STAT,
+    CMD_CLEAR,
+    CMD_MAXID
+} PluginControlCmdId;
+
+static const CommandEntry g_plugin_control_cmds[CMD_MAXID] ={
+    [CMD_QUIT]      = {.path="quit",      .help="Quit from the cli.",                .arg_hint=""},
+    //[CMD_RELEASE]   = {.path="release",   .help="Release all the plugins",           .arg_hint=""},
+    //[CMD_RELOAD]    = {.path="reload",    .help="Reload the plugins",                .arg_hint=""},
+    //[CMD_STOP]      = {.path="stop",      .help="Stops the server",                  .arg_hint=""},
+    [CMD_SET_DEBUG] = {.path="set debug", .help="set global debug log level",        .arg_hint="On / OFF"},
+    [CMD_STAT]      = {.path="stat",      .help="Statistics",                        .arg_hint=""},
+    [CMD_CLEAR]     = {.path="clear",     .help="Clear Statistics",                  .arg_hint=""},
+};
+
+
+// --- Field formatting model definitions ---
+typedef enum{
+    FID_PS_Pid,
+    FID_PS_Name,
+    FID_PS_State,
+    FID_PS_CpuLoad,
+    FID_PS_Prio,
+    FID_PS_VmRSS,
+    FID_PS_VmLib,
+    FID_PS_VmData,
+    FID_PS_Switch,
+    FID_PS_Voluntary,
+    FID_PS_Involutary,
+    FID_PS_MAXNUMBER
+} ProcStatFieldId_t;
+
+const FieldDescr g_fields_ProcStat[FID_PS_MAXNUMBER] = {
+    [FID_PS_Pid]        = { .name = "PID",           .fmt = "%6d",     .width = 6,  .align_right = 1, .type = FIELD_TYPE_INT,    .precision = -1 },
+    [FID_PS_Name]       = { .name = "Name",          .fmt = "%-16s",   .width = 16, .align_right = 0, .type = FIELD_TYPE_STRING, .precision = -1 },
+    [FID_PS_State]      = { .name = "St.",           .fmt = "%c",      .width = 3,  .align_right = 0, .type = FIELD_TYPE_CHAR,   .precision = -1 },
+    [FID_PS_CpuLoad]    = { .name = "CPU%",          .fmt = "%6.3f",   .width = 6,  .align_right = 1, .type = FIELD_TYPE_DOUBLE, .precision =  3 },
+    [FID_PS_Prio]       = { .name = "Prio",          .fmt = "%4d",     .width = 4,  .align_right = 1, .type = FIELD_TYPE_INT,    .precision = -1 },
+    [FID_PS_VmRSS]      = { .name = "VmRSS",         .fmt = "%7d",     .width = 7,  .align_right = 1, .type = FIELD_TYPE_INT,    .precision = -1 },
+    [FID_PS_VmLib]      = { .name = "VmLib",         .fmt = "%7d",     .width = 7,  .align_right = 1, .type = FIELD_TYPE_INT,    .precision = -1 },
+    [FID_PS_VmData]     = { .name = "VmData",        .fmt = "%7d",     .width = 7,  .align_right = 1, .type = FIELD_TYPE_INT,    .precision = -1 },
+    [FID_PS_Switch]     = { .name = "Switch",        .fmt = "%6d",     .width = 6,  .align_right = 1, .type = FIELD_TYPE_INT,    .precision = -1 },
+    [FID_PS_Voluntary]  = { .name = "Volun",         .fmt = "%6d",     .width = 6,  .align_right = 1, .type = FIELD_TYPE_INT,    .precision = -1 },
+    [FID_PS_Involutary] = { .name = "Invol",         .fmt = "%6d",     .width = 6,  .align_right = 1, .type = FIELD_TYPE_INT,    .precision = -1 }
+};
+const TableDescr g_table_ProcStat = {
+    .fields_count = FID_PS_MAXNUMBER,
+    .fields = g_fields_ProcStat
+};
+
+typedef enum {
+    FID_TS_Tid,
+    FID_TS_Name,
+    FID_TS_State,
+    FID_TS_CpuLoad,
+    FID_TS_Prio,
+    // FID_TS_Stack,
+    FID_TS_Switch,
+    FID_TS_Voluntary,
+    FID_TS_Involutary,
+    FID_TS_MAXNUMBER
+} ThreadStatFieldId_t;
+
+const FieldDescr g_fields_ThreadStat[FID_TS_MAXNUMBER] = {
+    [FID_TS_Tid]        = { .name = "TID",    .fmt = "%6d",     .width = 6,  .align_right = 1, .type = FIELD_TYPE_INT,    .precision = -1 },
+    [FID_TS_Name]       = { .name = "Name",   .fmt = "%-16s",   .width = 16, .align_right = 0, .type = FIELD_TYPE_STRING, .precision = -1 },
+    [FID_TS_State]      = { .name = "St.",    .fmt = "%c",      .width = 3,  .align_right = 0, .type = FIELD_TYPE_CHAR,   .precision = -1 },
+    [FID_TS_CpuLoad]    = { .name = "CPU%",   .fmt = "%6.3f",   .width = 6,  .align_right = 1, .type = FIELD_TYPE_DOUBLE, .precision =  3 },
+    [FID_TS_Prio]       = { .name = "Prio",   .fmt = "%4d",     .width = 4,  .align_right = 1, .type = FIELD_TYPE_INT,    .precision = -1 },
+    //[FID_TS_Stack]      = { .name = "Stack",  .fmt = "0x%08x",  .width = 10, .align_right = 1, .type = FIELD_TYPE_INT,    .precision = -1 },
+    [FID_TS_Switch]     = { .name = "Switch", .fmt = "%6d",     .width = 6,  .align_right = 1, .type = FIELD_TYPE_INT,    .precision = -1 },
+    [FID_TS_Voluntary]  = { .name = "Volun",  .fmt = "%6d",     .width = 6,  .align_right = 1, .type = FIELD_TYPE_INT,    .precision = -1 },
+    [FID_TS_Involutary] = { .name = "Invol",  .fmt = "%6d",     .width = 6,  .align_right = 1, .type = FIELD_TYPE_INT,    .precision = -1 }
+};
+
+const TableDescr g_table_ThreadStat = {
+    .fields_count = FID_TS_MAXNUMBER,
+    .fields = g_fields_ThreadStat
+};
+
+typedef enum {
+    FID_PLG_Id,
+    FID_PLG_Name,
+    FID_PLG_State,
+    FID_PLG_UseCount,
+    FID_PLG_LastUsed,
+    FID_PLG_Others,
+    FID_PLG_MAXNUMBER
+} PluginStatFieldId_t;
+
+const FieldDescr g_fields_PluginStat[FID_PLG_MAXNUMBER] = {
+    [FID_PLG_Id]        = { .name = "Id",      .fmt = "%2d",      .width = 2,  .align_right = 1, .type = FIELD_TYPE_INT,    .precision = -1 },
+    [FID_PLG_Name]      = { .name = "Name",    .fmt = "%-16s",    .width = 16, .align_right = 0, .type = FIELD_TYPE_STRING, .precision = -1 },
+    [FID_PLG_State]     = { .name = "State",   .fmt = "%-10s",    .width = 10, .align_right = 0, .type = FIELD_TYPE_STRING, .precision = -1 },
+    [FID_PLG_UseCount]  = { .name = "Use",     .fmt = "%5d",      .width = 5,  .align_right = 1, .type = FIELD_TYPE_INT,    .precision = -1 },
+    [FID_PLG_LastUsed]  = { .name = "Last",    .fmt = "%6s",      .width = 6,  .align_right = 1, .type = FIELD_TYPE_STRING, .precision = -1 },
+    [FID_PLG_Others]    = { .name = "Det, others",    .fmt = "%-64s",    .width = MAX_FIELD_STRING_LEN, .align_right = 0, .type = FIELD_TYPE_STRING, .precision = -1 },
+};
+
+const TableDescr g_table_PluginStat = {
+    .fields_count = FID_PLG_MAXNUMBER,
+    .fields = g_fields_PluginStat
+};
+
+// --- End Field formatting model header ---
+
 
 /**
- *  Process statistics dump from /proc/self/stat and /proc/self/status
+ *  Process statistics dump from /proc/self/sched and /proc/self/status
+ *  Enhanced: Parse starttime from stat, read /proc/uptime, compute per-runtime CPU usage using sum_exec_runtime.
  */
-void procfs_process_str_dump(char *buf, size_t len) {
+void stat_get_proc_results(const TableDescr *td, TableResults *res){
     unsigned long vmrss = 0, vmsize = 0, vmdata = 0, vmlib = 0;
+    if (res->rows_count != 1){
+        if (res->rows_count) table_results_free(res);
+        table_results_alloc( &g_table_ProcStat, res, 1);
+    }
+
     FILE *status = fopen("/proc/self/status", "r");
     if (status) {
         char line[256];
@@ -49,73 +170,197 @@ void procfs_process_str_dump(char *buf, size_t len) {
         fclose(status);
     }
 
-    FILE *fp = fopen("/proc/self/stat", "r");
-    if (!fp) return;
+    // Gather: PID, Name, State, Prio, starttime (from stat)
+    int pid = getpid();
+    char comm[256] = "";
+    char state = '?';
+    unsigned long priority = 0, starttime = 0;
+    FILE *fpstat = fopen("/proc/self/stat", "r");
+    if (fpstat) {
+        fscanf(fpstat, "%d (%255[^)]) %c", &pid, comm, &state);
+        for (int i = 0; i < 15; i++) fscanf(fpstat, "%*s"); // skip to priority (18th field)
+        fscanf(fpstat, "%lu", &priority); // priority
+        // skip nice, num_threads, itrealvalue
+        for (int i = 0; i < 3; i++) fscanf(fpstat, "%*s");
+        fscanf(fpstat, "%lu", &starttime); // 22nd field: starttime
+        fclose(fpstat);
+    }
 
-    int pid;
-    char comm[256];
-    char state;
-    unsigned long utime, stime, priority;
-    fscanf(fp, "%d (%255[^)]) %c", &pid, comm, &state);
-    for (int i = 0; i < 11; i++) fscanf(fp, "%*s");
-    fscanf(fp, "%lu %lu", &utime, &stime); // utime, stime
-    for (int i = 0; i < 2; i++) fscanf(fp, "%*s");
-    fscanf(fp, "%lu", &priority); // priority
-    fclose(fp);
+    // Read uptime from /proc/uptime
+    double uptime = 0.0;
+    FILE *uptime_fp = fopen("/proc/uptime", "r");
+    if (uptime_fp) {
+        fscanf(uptime_fp, "%lf", &uptime);
+        fclose(uptime_fp);
+    }
+    long clk_tck = sysconf(_SC_CLK_TCK);
+    double proc_start_secs = (double)starttime / (double)clk_tck;
+    double runtime = uptime - proc_start_secs;
+    int runtime_is_zero = (runtime < 1e-6);
 
-    snprintf(buf, len,
-        "PID    | Name             |St.|   CPU     |Pri |  VmRSS |  VmLib | VmData |\r\n"
-        "-------+------------------+---+-----------+----+--------+--------+--------+\r\n"
-        "%-6d | %-16s | %c | %4lu+%-4lu | %-2lu | %6lu | %6lu | %6lu |\r\n\r\n",
-        pid, comm, state, utime, stime, priority, vmrss, vmlib, vmdata);
+    // Parse /proc/self/sched for sum_exec_runtime, switches, prio
+    double sum_exec_runtime = 0.0;
+    unsigned long nr_switches = 0;
+    unsigned long nr_voluntary_switches = 0;
+    unsigned long nr_involuntary_switches = 0;
+    unsigned long sched_prio = 0;
+    FILE *fpsched = fopen("/proc/self/sched", "r");
+    if (fpsched) {
+        char line[256];
+        while (fgets(line, sizeof(line), fpsched)) {
+            if (sscanf(line, "se.sum_exec_runtime : %lf", &sum_exec_runtime) == 1) continue;
+            if (sscanf(line, "nr_switches : %lu", &nr_switches) == 1) continue;
+            if (sscanf(line, "nr_voluntary_switches : %lu", &nr_voluntary_switches) == 1) continue;
+            if (sscanf(line, "nr_involuntary_switches : %lu", &nr_involuntary_switches) == 1) continue;
+            if (sscanf(line, "prio : %lu", &sched_prio) == 1) continue;
+        }
+        fclose(fpsched);
+    }
+    // Use prio from sched if available
+    if (sched_prio > 0) priority = sched_prio;
+
+    double cpu_pct = 0.0;
+    char cpu_pct_str[8] = "n/a";
+    if (!runtime_is_zero && sum_exec_runtime > 0.0) {
+        cpu_pct = (sum_exec_runtime / runtime) * 100.0;
+        snprintf(cpu_pct_str, sizeof(cpu_pct_str), "%6.3f", cpu_pct);
+    }
+    FieldValue* row = table_row_get(td, res, 0);
+    row[FID_PS_Pid].i = pid;
+    table_field_set_str( &row[FID_PS_Name], comm);
+    row[FID_PS_State].c = state;
+    row[FID_PS_CpuLoad].d = cpu_pct;
+    row[FID_PS_Prio].i = (int)priority;
+    row[FID_PS_VmRSS].i = (int)vmrss;
+    row[FID_PS_VmLib].i = (int)vmlib;
+    row[FID_PS_VmData].i = (int)vmdata;
+    row[FID_PS_Switch].i = (int)nr_switches;
+    row[FID_PS_Voluntary].i = (int)nr_voluntary_switches;
+    row[FID_PS_Involutary].i = (int)nr_involuntary_switches;
 }
 
 /**
- * Thread statistics from procfs
+ * Thread statistics from procfs, using /proc/[pid]/task/[tid]/sched for runtime and switches.
  */
-int procfs_threads_str_dump(char* buf, size_t len){
-    int o = 0;
+void stat_get_thread_results(const TableDescr *td, TableResults *res){
     char path[MAX_PATH];
     snprintf(path, MAX_PATH, "/proc/%d/task/", getpid());
     DIR *dir = opendir(path);
-    if (dir) {
-        o += snprintf(buf + o, len - o, "TID    | Name             | St.|   CPU     |Pri |   Stack    |\r\n");
-        o += snprintf(buf + o, len - o, "-------+------------------+----+-----------+----+------------+\r\n");
-        struct dirent *entry;
-        while ((entry = readdir(dir)) != NULL) {
-            if (entry->d_type != DT_DIR) continue;
-            if (!isdigit(entry->d_name[0])) continue;
-
-            char stat_path[MAX_PATH];
-            snprintf(stat_path, MAX_PATH, "/proc/%d/task/%s/stat", getpid(), entry->d_name);
-
-            FILE *fp = fopen(stat_path, "r");
-            if (fp) {
-                char comm[256], state;
-                int pid;
-                unsigned long utime, stime;
-                // Remove RSS, add priority and stack pointer (kstkesp)
-                // Parse from /proc/[pid]/task/[tid]/stat: https://man7.org/linux/man-pages/man5/proc.5.html
-                fscanf(fp, "%d (%255[^)]) %c", &pid, comm, &state);
-                for (int i = 0; i < 11; i++) fscanf(fp, "%*s"); // skip to utime
-                fscanf(fp, "%lu %lu", &utime, &stime);
-                for (int i = 0; i < 2; i++) fscanf(fp, "%*s"); // skip cutime, cstime
-                unsigned long priority;
-                fscanf(fp, "%lu", &priority);
-                for (int i = 0; i < 12; i++) fscanf(fp, "%*s"); // skip to kstkesp
-                unsigned long kstkesp = 0;
-                fscanf(fp, "%lu", &kstkesp);
-                fclose(fp);
-
-                o += snprintf(buf + o, len - o, "%-6s | %-16s | %c  | %4lu+%-4lu | %-2lu | 0x%08lx |\r\n",
-                    entry->d_name, comm, state, utime, stime, priority, kstkesp);
-            }
-        }
-        o += snprintf(buf + o, len - o, "\r\n");
-        closedir(dir);
+    if (!dir) {
+        g_host->debugmsg("No dir ?");
+        return;
     }
-    return o;
+    size_t row_count = 0;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_type != DT_DIR) continue;
+        if (!isdigit(entry->d_name[0])) continue;
+        row_count++;
+    }
+    if (row_count != res->rows_count){
+       table_results_free(res);
+       table_results_alloc(td, res, row_count);
+    }
+    row_count = 0;
+    closedir(dir);
+    dir = opendir(path);
+    if (!dir) {
+        g_host->debugmsg("Reopen of thread task dir failed");
+        return;
+    }
+
+    // Get process uptime for runtime calculation
+    unsigned long proc_starttime = 0;
+    long clk_tck = sysconf(_SC_CLK_TCK);
+    double uptime = 0.0;
+    FILE *uptime_fp = fopen("/proc/uptime", "r");
+    if (uptime_fp) {
+        fscanf(uptime_fp, "%lf", &uptime);
+        fclose(uptime_fp);
+    }
+    // Get process starttime from stat
+    FILE *fpstat = fopen("/proc/self/stat", "r");
+    if (fpstat) {
+        int dummy;
+        char dummy_comm[256], dummy_state;
+        fscanf(fpstat, "%d (%255[^)]) %c", &dummy, dummy_comm, &dummy_state);
+        for (int i = 0; i < 21; i++) fscanf(fpstat, "%*s");
+        fscanf(fpstat, "%lu", &proc_starttime);
+        fclose(fpstat);
+    }
+    double proc_start_secs = (double)proc_starttime / (double)clk_tck;
+    double proc_runtime = uptime - proc_start_secs;
+    if (proc_runtime < 1e-6) proc_runtime = 0.0;
+
+    while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_type != DT_DIR) continue;
+        if (!isdigit(entry->d_name[0])) continue;
+
+        FieldValue * row = table_row_get(td, res, row_count++);
+        if (!row) continue; // new thread added between these lines...
+        char stat_path[MAX_PATH], sched_path[MAX_PATH];
+        snprintf(stat_path, MAX_PATH, "/proc/self/task/%s/stat", entry->d_name);
+        snprintf(sched_path, MAX_PATH, "/proc/self/task/%s/sched", entry->d_name);
+
+        char comm[256] = "";
+        char state = '?';
+        unsigned long priority = 0, starttime = 0, kstkesp = 0;
+        // Read stat for name, state, prio, starttime, kstkesp
+        FILE *fp = fopen(stat_path, "r");
+        if (fp) {
+            int tid;
+            fscanf(fp, "%d (%255[^)]) %c", &tid, comm, &state);
+            for (int i = 0; i < 15; i++) fscanf(fp, "%*s"); // skip to priority
+            fscanf(fp, "%lu", &priority);
+            for (int i = 0; i < 3; i++) fscanf(fp, "%*s");
+            fscanf(fp, "%lu", &starttime);
+            for (int i = 0; i < 6; i++) fscanf(fp, "%*s");
+            fscanf(fp, "%lu", &kstkesp);
+            fclose(fp);
+        }
+
+        // Parse sched for sum_exec_runtime, switches, prio
+        double sum_exec_runtime = 0.0;
+        unsigned long nr_switches = 0;
+        unsigned long nr_voluntary_switches = 0;
+        unsigned long nr_involuntary_switches = 0;
+        unsigned long sched_prio = 0;
+        FILE *fpsched = fopen(sched_path, "r");
+        if (fpsched) {
+            char line[256];
+            while (fgets(line, sizeof(line), fpsched)) {
+                if (sscanf(line, "se.sum_exec_runtime : %lf", &sum_exec_runtime) == 1) continue;
+                if (sscanf(line, "nr_switches : %lu", &nr_switches) == 1) continue;
+                if (sscanf(line, "nr_voluntary_switches : %lu", &nr_voluntary_switches) == 1) continue;
+                if (sscanf(line, "nr_involuntary_switches : %lu", &nr_involuntary_switches) == 1) continue;
+                if (sscanf(line, "prio : %lu", &sched_prio) == 1) continue;
+            }
+            fclose(fpsched);
+        }
+        if (sched_prio > 0) priority = sched_prio;
+
+        // Compute per-thread runtime (uptime - thread starttime)
+        double thread_start_secs = (double)starttime / (double)clk_tck;
+        double thread_runtime = uptime - thread_start_secs;
+        if (thread_runtime < 1e-6) thread_runtime = 0.0;
+        double cpu_pct = 0.0;
+        if (thread_runtime > 0.0 && sum_exec_runtime > 0.0) {
+            cpu_pct = (sum_exec_runtime / thread_runtime) * 100.0;
+        }
+        //table_field_set_str(&row[FID_TS_Tid], entry->d_name);
+        row[FID_TS_Tid].i = (int)atoi(entry->d_name);
+        table_field_set_str(&row[FID_TS_Name], comm);
+        row[FID_TS_State].c = state;
+        row[FID_TS_CpuLoad].d = cpu_pct;
+        row[FID_TS_Prio].i = priority;
+        // row[FID_TS_Stack].i = (int)kstkesp; // useless
+        row[FID_TS_Switch].i = (int)nr_switches;
+        row[FID_TS_Voluntary].i = (int)nr_voluntary_switches;
+        row[FID_TS_Involutary].i = (int)nr_involuntary_switches;
+    }
+    closedir(dir);
 }
+
 static const char *g_state_labels[PLUGIN_STATE_MAX] ={ // "0ulLIsRS7"; 
     [PLUGIN_STATE_NONE] = "None",
     [PLUGIN_STATE_UNLOADED] = "Unloaded",
@@ -130,64 +375,114 @@ static const char *g_state_labels[PLUGIN_STATE_MAX] ={ // "0ulLIsRS7";
 /**
  * Plugin statistics
  */
-void plugins_str_dump(char *buf, int len){
-    int o=0;
+void stat_get_plugins_results(const TableDescr *td, TableResults *tr){
+    
     unsigned long now = time(NULL);
     int pn = g_host->server.get_plugin_count();
-    o += snprintf(buf + o, len - o, "Id | Plugin name    | State    | Use | Last | Det\r\n");
-    o += snprintf(buf + o, len - o, "---+----------------+----------+-----+------+-----\r\n");
+    size_t row_count=0;
+    for (int i= 0; i< pn; i++){
+        PluginContext *p= g_host->server.get_plugin(i);
+        if (p->state == PLUGIN_STATE_DISABLED) continue;
+        row_count++;
+    }
+    if (row_count != tr->rows_count){
+        table_results_free(tr);
+        table_results_alloc( td, tr, row_count);
+    }
+
+    row_count =0;
     for (int i=0 ; i<pn; i++){
         PluginContext *p= g_host->server.get_plugin(i);
         if (p->state == PLUGIN_STATE_DISABLED) continue;
-        
-        o += snprintf(buf + o, len - o, "%-2d |%-16s|%-10s|%5d|", i, p->name, g_state_labels[p->state], p->used_count );
+        FieldValue *row= table_row_get( td, tr, row_count++);
+        row[FID_PLG_Id].i = i;
+        table_field_set_str( &row[FID_PLG_Name], p->name);
+        table_field_set_str( &row[FID_PLG_State], g_state_labels[p->state]);
+        row[FID_PLG_UseCount].i = p->used_count;
 
+        char tmp[16];
         if (p->last_used){
             int dif = now - p->last_used;
             if (dif<120){
-                o += snprintf(buf + o, len - o, "%4d s|", dif );
+                snprintf(tmp, sizeof(tmp), "%4d s", dif );
             }else if (dif<7200){
-                o += snprintf(buf + o, len - o, "%4d m|", dif/60 );
+                snprintf(tmp, sizeof(tmp), "%4d m", dif/60 );
             }else{
-                o += snprintf(buf + o, len - o, "%4d h|", dif/3600 );
+                snprintf(tmp, sizeof(tmp), "%4d h", dif/3600 );
             }
-        }
-
-        if (p->stat.det_str_dump){
-            o += p->stat.det_str_dump(buf+o, len - o);
         }else{
-            o += snprintf(buf + o, len - o, " n/a");
+            snprintf(tmp, sizeof(tmp), "n/a");
+        }
+        //row[FID_PLG_LastUsed].i = dif; // of we have a converter function callback it would be better
+        table_field_set_str( &row[FID_PLG_LastUsed], tmp);
+
+        char dmp[MAX_FIELD_STRING_LEN];
+        size_t dlen=MAX_FIELD_STRING_LEN-1;
+        size_t od=0;
+        if (p->stat.det_str_dump){
+            od += p->stat.det_str_dump(dmp+od, dlen - od);
+        }else{
+            od += snprintf(dmp + od, dlen - od, "n/a");
         }
         if (p->stat.stat_str_dump){
-            o += p->stat.stat_str_dump(buf+o, len - o);
+            od += p->stat.stat_str_dump(dmp+od, dlen - od);
         }
         for (int i=0; i< p->thread.own_threads_count; i++){
             PluginOwnThreadInfo *pi = &p->thread.own_threads[i];
-            o += snprintf(buf + o, len - o, " %d:%s %d/%d %p", i, pi->name, pi->running, pi->control.keep_running, pi->thread);
+            od += snprintf(dmp + od, dlen - od, " %d:%s %d/%d %p", i, pi->name, pi->running, pi->control.keep_running, pi->thread);
         }
         if (p->handle){
-            o += snprintf(buf + o, len - o, " 0x%08lx",(unsigned long) p->handle);
+            od += snprintf(dmp + od, dlen - od, " 0x%08lx",(unsigned long) p->handle);
         }
-    
-        o += snprintf(buf + o, len - o, "\r\n");
+        table_field_set_str( &row[FID_PLG_Others], dmp);
     }
 }
 
+TableResults g_results_ProcStat = {.fields = NULL, .rows_count=0};
+TableResults g_results_ThreadStat = {.fields = NULL, .rows_count=0};
+TableResults g_results_PluginsStat = {.fields = NULL, .rows_count=0};
+const TableDescr *gp_table_ServerStat = NULL;
+TableResults *gp_results_ServerStat = NULL;
 /**
  * Generate statistics
  */
-void genStat(int fd){
+void genStat_ProcFs(){
+    stat_get_proc_results(&g_table_ProcStat, &g_results_ProcStat);
+    stat_get_thread_results(&g_table_ThreadStat, &g_results_ThreadStat);
+}
+void genStat_Plugins(){
+    stat_get_plugins_results(&g_table_PluginStat, &g_results_PluginsStat);
+    g_host->server.server_stat_table(&gp_table_ServerStat, &gp_results_ServerStat);
+}
+
+/**
+ * Textual dump from prviously calculated datas
+ */
+size_t stat_text_gen(TextContext *tc, char* buf, size_t len){
+    size_t o = 0; 
+    tc->title = "Process statistics"; tc->id = "proc"; tc->flags=1;
+    o += table_gen_text( &g_table_ProcStat, &g_results_ProcStat, buf + o, len - o, tc);
+    tc->title = "Thread statistics"; tc->id = "threads"; tc->flags=2;
+    o += table_gen_text( &g_table_ThreadStat, &g_results_ThreadStat, buf + o, len - o, tc);
+    tc->title = "Plugin statistics"; tc->id = "plugins"; tc->flags=2;
+    o += table_gen_text( &g_table_PluginStat, &g_results_PluginsStat, buf + o, len - o, tc);
+    tc->title = "Server statistics"; tc->id = "servers"; tc->flags=2|4;
+    o += table_gen_text( gp_table_ServerStat, gp_results_ServerStat, buf + o, len - o, tc);
+    return o;
+}
+
+void dumpStat(int fd){
+    (void)fd;
     char buf[BUF_SIZE];
-    procfs_process_str_dump(buf, BUF_SIZE);
-    dprintf(fd, "\r\nProcess statistics\r\n%s", buf);
-    g_host->server.server_det_str_dump(buf, BUF_SIZE);
+    size_t o=0;
+    TextContext tc;
+    tc.format = TEXT_FMT_TEXT;
+    o+=stat_text_gen(&tc, buf, sizeof(buf));
+    dprintf(fd, "\r\n%s", buf);
+
+    g_host->server.server_det_str_dump(buf, sizeof(buf));
     dprintf(fd, "Host Det:%s\r\n", buf);
-    procfs_threads_str_dump(buf, BUF_SIZE);
-    dprintf(fd, "Thread statistics\r\n%s", buf);
-    plugins_str_dump(buf, BUF_SIZE);
-    dprintf(fd, "Plugin statistics\r\n%s", buf);
-    g_host->server.server_dump_stat(buf, BUF_SIZE);
-    dprintf(fd, "\r\nProtocol statistics\r\n%s", buf);
+
 }
 
 /**
@@ -202,6 +497,50 @@ void stat_clear(){
     g_host->server.server_stat_clear();
 }
 
+/** 
+ * command line handler for CLI protocol
+ */
+static int plugin_control_execute_command(PluginContext *pc, ClientContext *ctx, CommandEntry *pe, char* cmd)
+{
+    (void)ctx;
+    (void)cmd;
+
+    PluginContext *targetPc= pe->pc;
+    if (!targetPc){
+        // host implemented command handler
+        return g_host->server.execute_commands(ctx, pe, cmd);
+    }else{
+        // a target plugin implemented command handler
+        if (pc->id == targetPc->id){
+            //the same plugin, surly no need to start the plugin
+            switch (pe->handlerid)
+            {
+            case CMD_QUIT: return -3; break;
+            case CMD_CLEAR: stat_clear(); break;
+            case CMD_SET_DEBUG: return 0; break;
+            case CMD_STAT:
+                return -1;
+            }
+        }else{
+            //another plugin
+            if (g_host->start( targetPc->id)){
+                targetPc->control.execute_command(targetPc, ctx, pe, cmd);
+                g_host->stop(targetPc->id);
+            }
+        }
+    }
+
+    /*
+    if (strcmp(line, "q") == 0 || strcmp(line, "quit") == 0) {
+        return -3;
+    } else if (strcmp(line, "c") == 0 || strcmp(line, "clear") == 0) {
+        stat_clear();
+        return 0;
+    } 
+    */
+    return -2;
+}
+
 /**
  * Control protocol (CLI) handler
  */
@@ -210,10 +549,15 @@ void pcontrol_handler(PluginContext *pc, ClientContext *ctx, char* cmd, int argc
     (void)pc;
     (void)argc;
     (void)argv;
-
+    (void)cmd;
+/*
     if (strcasecmp(cmd, "help") == 0) {
         dprintf(ctx->socket_fd, "HELP:\nThis is the command line interface.\nAvailable commands:\n- help\n- vt100\n");
-    } else if (strcasecmp(cmd, "vt100") == 0) {
+    } else if (strcasecmp(cmd, "vt100") == 0) */
+    {
+        genStat_ProcFs();
+        genStat_Plugins();
+
         int orig_flags = fcntl(ctx->socket_fd, F_GETFL, 0);
         if (orig_flags != -1) {
             fcntl(ctx->socket_fd, F_SETFL, orig_flags | O_NONBLOCK);
@@ -305,20 +649,27 @@ void pcontrol_handler(PluginContext *pc, ClientContext *ctx, char* cmd, int argc
                                     break;
                                 }
                                 if (c == '\r' || c == '\n') {
-                                    dprintf(ctx->socket_fd, "\r\n");
+                                    // dprintf(ctx->socket_fd, "\r\n");
                                     if (line_len > 0) {
                                         if (history_count < 10) {
                                             strcpy(history[history_count++], line);
                                         }
                                         history_index = history_count;
                                     }
-                                    if (strcmp(line, "q") == 0 || strcmp(line, "quit") == 0) {
-                                        ptc->keep_running = 0;
-                                        break;
-                                    }else if (strcmp(line, "c") == 0 || strcmp(line, "clear") == 0) {
-                                        stat_clear();
-                                        screen_refresh = 1;
+                                    if (strlen(line) > 0) {
+                                        int found = g_host->server.cmd_search(line);
+                                        if (found >= 0) {
+                                            CommandEntry *pe;
+                                            if (!g_host->server.cmd_get(found, &pe)) {
+                                                g_host->debugmsg("Found command: %s\r\n", pe->path);
+                                                int ret= plugin_control_execute_command(pc, ctx, pe, line);
+                                                if (-3 ==ret) ptc->keep_running = 0;
+                                            }
+                                        } else {
+                                            g_host->debugmsg("Unknown command: %s\r\n", line);
+                                        }
                                     }
+                                    screen_refresh = 1;
                                     line[0] = '\0';
                                     line_len = 0;
                                     cursor_pos = 0;
@@ -335,6 +686,32 @@ void pcontrol_handler(PluginContext *pc, ClientContext *ctx, char* cmd, int argc
                                     cursor_pos = 0;
                                 } else if (c == 5) {
                                     cursor_pos = line_len;
+                                } else if (c == '\t') {
+                                    int match_count = 0;
+                                    int last_match = -1;
+                                    for (size_t k = 0; k < g_host->server.cmd_get_count(); k++) {
+                                        CommandEntry *pe = NULL;
+                                        if (g_host->server.cmd_get(k, &pe) == 0 && pe && pe->path &&
+                                            strncmp(pe->path, line, strlen(line)) == 0) {
+                                            match_count++;
+                                            last_match = (int)k;
+                                        }
+                                    }
+
+                                    if (match_count == 1 && last_match >= 0) {
+                                        CommandEntry *pe = NULL;
+                                        if (!g_host->server.cmd_get((size_t)last_match, &pe)) {
+                                            size_t match_len = strlen(pe->path);
+                                            if (match_len < sizeof(line)) {
+                                                strcpy(line, pe->path);
+                                                line_len = strlen(line);
+                                                cursor_pos = line_len;
+                                                screen_refresh = 1;
+                                            }
+                                        }
+                                    } else if (match_count > 1) {
+                                        screen_refresh = 1;
+                                    }
                                 } else if (isprint(c) && line_len < sizeof(line) - 1) {
                                     memmove(&line[cursor_pos + 1], &line[cursor_pos], line_len - cursor_pos);
                                     line[cursor_pos++] = c;
@@ -424,13 +801,29 @@ void pcontrol_handler(PluginContext *pc, ClientContext *ctx, char* cmd, int argc
             } else if (ret == 0) {
                 tick++;
                 if (tick % 40 == 0) {
+                    genStat_ProcFs();
+                    screen_refresh =1;
+                }
+                if (tick % 20 == 0) {
+                    genStat_Plugins();
                     screen_refresh =1;
                 }
                 if (ansi_state == STATE_NORMAL) {
-                    if (screen_refresh) {
+                if (screen_refresh) {
                         dprintf(ctx->socket_fd, "\x1b[2J\x1b[HVT100 mode started. Press 'q' or 'quit' to exit. 'h' or 'help' for more info.\r\n");
                         dprintf(ctx->socket_fd, "\x1b[2;1HStatus: running %d s state: %d history: %d/%d line: %zu", tick / 20, ansi_state, history_index, history_count, line_len);
-                        genStat(ctx->socket_fd);
+                        dumpStat(ctx->socket_fd);
+                        // Print matching suggestions above prompt
+                        dprintf(ctx->socket_fd, "\x1b[%d;1H\x1b[2K", prompt_row - 1); // move cursor up and clear line
+                        dprintf(ctx->socket_fd, "Suggestions:");
+                        for (size_t k = 0; k < g_host->server.cmd_get_count(); k++) {
+                            CommandEntry *pe = NULL;
+                            if (g_host->server.cmd_get(k, &pe) == 0 && pe && pe->path &&
+                                strncmp(pe->path, line, strlen(line)) == 0) {
+                                dprintf(ctx->socket_fd, " '%s'", pe->path);
+                            }
+                        }
+                        dprintf(ctx->socket_fd, "\r\n");
                         dprintf(ctx->socket_fd, "\x1b[%d;%dH\x1b[2K> %s ", prompt_row, prompt_col, line);
                         dprintf(ctx->socket_fd, "\x1b[%d;%zuH", prompt_row, prompt_col + 2 + cursor_pos);
                         screen_refresh = 0;
@@ -444,6 +837,11 @@ void pcontrol_handler(PluginContext *pc, ClientContext *ctx, char* cmd, int argc
                 break;
             }
         }
+
+        table_results_free(&g_results_ProcStat);
+        table_results_free(&g_results_ThreadStat);
+        table_results_free(&g_results_PluginsStat);
+
         dprintf(ctx->socket_fd, "\x1b[12h");  // DECSET 12 – Enable local echo
         // Telnet protokoll reset to echo mode
         unsigned char telnet_restore[] = {
@@ -464,10 +862,65 @@ void pcontrol_handler(PluginContext *pc, ClientContext *ctx, char* cmd, int argc
     return;
 }
 
+void http_html_handler(PluginContext *pc, ClientContext *ctx, RequestParams *params) {
+    (void)pc;
+    (void)params;
+    char buf[BUF_SIZE];
+    size_t len = BUF_SIZE -1;
+    size_t o = 0; // offset
+    o += snprintf(buf + o, len - o, "<html><head>\n");
+    o += snprintf(buf + o, len - o, "<style>\n");
+    o += snprintf(buf + o, len - o, "body { background-color: #000; color: #ddd; font-family: monospace, sans-serif; font-size: 14px; }\n");
+    o += snprintf(buf + o, len - o, "table { border-collapse: collapse; margin: 1em 0; width: 100%%; }\n");
+    o += snprintf(buf + o, len - o, "th, td { border: 1px solid #444; padding: 4px 8px; }\n");
+    o += snprintf(buf + o, len - o, "tr.head { background-color: #444; color: #fff; font-weight: bold; }\n");
+    o += snprintf(buf + o, len - o, "tr.roweven { background-color: #111; color: #ccc; }\n");
+    o += snprintf(buf + o, len - o, "tr.rowodd { background-color: #222; color: #ccc; }\n");
+    o += snprintf(buf + o, len - o, "td.cellleft { text-align: left; }\n");
+    o += snprintf(buf + o, len - o, "td.cellright { text-align: right; }\n");
+    o += snprintf(buf + o, len - o, "</style>\n");
+    o += snprintf(buf + o, len - o, "</head><body>\n");
+    genStat_ProcFs();
+    genStat_Plugins();
+    TextContext tc;
+    tc.format= TEXT_FMT_HTML;
+    o += stat_text_gen(&tc, buf+o, len-o);
+    o += snprintf(buf + o, len - o, "\n</body></html>\n");
+    g_host->http.send_response(ctx->socket_fd, 200, "text/html", buf);
+}
+void http_json_handler(PluginContext *pc, ClientContext *ctx, RequestParams *params) {
+    (void)pc;
+    (void)params;
+    char buf[BUF_SIZE];
+    size_t len = BUF_SIZE -1;
+    size_t o = 0;
+    genStat_ProcFs();
+    genStat_Plugins();
+    TextContext tc;
+    tc.format = TEXT_FMT_JSON_OBJECTS;
+    o += stat_text_gen(&tc, buf+o, len-o);
+    g_host->http.send_response(ctx->socket_fd, 200, "application/json", buf);
+}
+static void (* const g_http_handlers[2])(PluginContext *, ClientContext *, RequestParams *) = {
+    http_html_handler, http_json_handler
+};
+void http_handler(PluginContext *pc, ClientContext *ctx, RequestParams *params) {
+    for (int i = 0; i < g_http_routes_count; i++) {
+        if (strcmp(g_http_routes[i], params->path) == 0) {
+            g_http_handlers[i](pc, ctx, params);
+            return;
+        }
+    }
+    const char *body = "{\"msg\":\"Unknown sub path\"}";
+    g_host->http.send_response(ctx->socket_fd, 200, "application/json", body);
+    g_host->logmsg("%s mysql request", ctx->client_ip);
+}
+
 int plugin_register(PluginContext *pc, const PluginHostInterface *host) {
     (void)pc;
     g_host = host;
-    g_host->server.register_control_route(pc, g_control_routess_count, g_control_routes);
+    g_host->server.register_commands(pc, g_plugin_control_cmds, sizeof(g_plugin_control_cmds)/sizeof(CommandEntry));
+    g_host->server.register_http_route(pc, g_http_routes_count, g_http_routes);
     return PLUGIN_SUCCESS;
 }
 
@@ -486,7 +939,11 @@ int plugin_thread_finish(PluginContext *ctx) {
 int plugin_init(PluginContext* pc, const PluginHostInterface *host) {
     (void)pc;
     g_host = host;
-    pc->control.request_handler = pcontrol_handler;
+    // control protocol
+    pc->control.request_handler = pcontrol_handler; // communication layer of the CLI
+    pc->control.execute_command = plugin_control_execute_command; // command execution layer
+    // http protocol
+    pc->http.request_handler= http_handler;
     return PLUGIN_SUCCESS;
 }
 

@@ -31,10 +31,17 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 
+#define HTTP_STATIC_LINKED
+
 #include "global.h"
+#include "sync.h"
 #include "http.h"
 #include "plugin.h"
 #include "config.h"
+#include "hashmap.h"
+
+#define HTTP_ROUTE_LOCK_TIMEOUT (50) // 50ms
+
 
 //just for debug
 void logmsg(const char *fmt, ...) ;
@@ -271,4 +278,77 @@ void parse_request_path_and_params(const char *request, RequestParams *params) {
         }
     }
     strncpy(params->path, path_query, sizeof(params->path)-1);
+}
+
+typedef struct{
+    size_t id;
+    char route[MAX_HTTP_KEY_LEN];
+    PluginContext *pc;
+    PluginHttpRequestHandler handler;
+} HttpRouteHandler_t;
+
+HttpRouteHandler_t g_http_route_array[MAX_QUERY_VARS];
+size_t g_http_route_numbers=0;
+hashmap_t g_http_route_hasmap;
+sync_mutex_t *g_http_route_lock;
+
+size_t http_route_count(){
+    return g_http_route_numbers;
+}
+
+int http_route_get(size_t index, PluginHttpRequestHandler *prh, PluginContext **ppc){
+    if (index >= g_http_route_numbers) return -1;
+    *prh = g_http_route_array[index].handler;
+    *ppc = g_http_route_array[index].pc;
+    return 0;
+}
+int http_route_get_path(size_t index, const char **path){
+    if (index >= g_http_route_numbers) return -1;
+    *path = g_http_route_array[index].route;
+    return 0;
+}
+void http_route_register(const char *route, PluginHttpRequestHandler handler, PluginContext* pc){
+    if (!sync_mutex_lock(g_http_route_lock, HTTP_ROUTE_LOCK_TIMEOUT)){
+        size_t index= g_http_route_numbers++;
+        HttpRouteHandler_t *rh = &g_http_route_array[index];
+        rh->id= index;
+        strncpy(rh->route, route, sizeof(rh->route));
+        rh->handler = handler;
+        rh->pc = pc;
+        int r=hashmap_add(&g_http_route_hasmap, rh->route, index);
+        if (r){
+            errormsg("hashmap returns error");
+        }
+        sync_mutex_unlock(g_http_route_lock);
+    }else{
+        errormsg("http_route_register mutex lock error");
+    }
+}
+int http_route_search(const char *route, PluginHttpRequestHandler *prh, PluginContext **ppc){
+    size_t index=(size_t)-1;
+    int ret = hashmap_search( &g_http_route_hasmap, route, &index);
+    if (0 == ret){
+        *prh = g_http_route_array[index].handler;
+        *ppc = g_http_route_array[index].pc;
+    }
+    return ret;
+}
+// temporary solution , to initialize host's internal handlers
+void handle_status_html(PluginContext* pc, ClientContext *ctx, RequestParams *params);
+void handle_status_json(PluginContext *pc, ClientContext *ctx, RequestParams *params);
+void infopage(PluginContext *pc, ClientContext *ctx, RequestParams *params);
+void test_image(PluginContext*pc, ClientContext *ctx, RequestParams *params);
+
+void http_init(){
+    sync_mutex_init(&g_http_route_lock);
+    hashmap_init(&g_http_route_hasmap, 128);
+    http_route_register( "/test", test_image, NULL);
+    http_route_register( "/status.html", handle_status_html, NULL);
+    http_route_register( "/status.json", handle_status_json, NULL);
+    http_route_register( "/", infopage, NULL);
+}
+void http_destroy(){
+    hashmap_destroy(&g_http_route_hasmap);
+    sync_mutex_destroy(g_http_route_lock);
+    g_http_route_lock = NULL;
 }

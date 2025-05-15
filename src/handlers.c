@@ -12,12 +12,18 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+#define HTTP_STATIC_LINKED
+#define PLUGINHST_STATIC_LINKED
+
 #include "global.h"
 #include "config.h"
 #include "plugin.h"
 #include "pluginhst.h"
 #include "handlers.h"
 #include <png.h>
+
+int http_route_get(size_t index, PluginHttpRequestHandler *prh, PluginContext **ppc);
 
 // extras for stats only
 extern int g_PluginCount;
@@ -33,13 +39,30 @@ const PluginHostInterface *g_host= &g_plugin_host;
 
 #define MAX_HTML_BUF (8192)
 
-void handle_status_html(ClientContext *ctx, RequestParams *params) {
-    const char *html_head = "<html><body><h1>GeoD Status</h1><p>Server is running.</p>";
+void handle_status_html(PluginContext*pc, ClientContext *ctx, RequestParams *params) {
+    (void)pc;
+    (void)ctx;
+    size_t o =0;
+    char buf[BUF_SIZE];
+    size_t len = BUF_SIZE;
+    o += snprintf(buf + o, len - o, "<html><head>");
+    o += snprintf(buf + o, len - o, "<style>\n");
+    o += snprintf(buf + o, len - o, "body { background-color: #000; color: #ddd; font-family: monospace, sans-serif; font-size: 14px; }\n");
+    o += snprintf(buf + o, len - o, "table { border-collapse: collapse; margin: 1em 0; width: 100%%; }\n");
+    o += snprintf(buf + o, len - o, "th, td { border: 1px solid #444; padding: 4px 8px; }\n");
+    o += snprintf(buf + o, len - o, "tr.head { background-color: #444; color: #fff; font-weight: bold; }\n");
+    o += snprintf(buf + o, len - o, "tr.roweven { background-color: #111; color: #ccc; }\n");
+    o += snprintf(buf + o, len - o, "tr.rowodd { background-color: #222; color: #ccc; }\n");
+    o += snprintf(buf + o, len - o, "td.cellleft { text-align: left; }\n");
+    o += snprintf(buf + o, len - o, "td.cellright { text-align: right; }\n");
+    o += snprintf(buf + o, len - o, "</style>\n");
+    o += snprintf(buf + o, len - o, "</head><body><h1>GeoD Status</h1><p>Server is running.</p>");
+
     const char *html_end =  "</body></html>";
     char html[MAX_HTML_BUF];
     int offset = 0;
 
-    offset += snprintf(html + offset, sizeof(html) - offset, "%s", html_head);
+    offset += snprintf(html + offset, sizeof(html) - offset, "%s", buf);
     offset += snprintf(html + offset, sizeof(html) - offset, "<p>Client IP: %s</p>", ctx->client_ip);
     offset += snprintf(html + offset, sizeof(html) - offset, "<p>Request Path: %s</p>", params->path);
     offset += snprintf(html + offset, sizeof(html) - offset, "<p>Request Params:</p><ul>");
@@ -54,16 +77,23 @@ void handle_status_html(ClientContext *ctx, RequestParams *params) {
     offset += snprintf(html + offset, sizeof(html) - offset, "</ul>");
     offset += snprintf(html + offset, sizeof(html) - offset, "<p>Request Method: %s</p>", ctx->request.method);
     offset += snprintf(html + offset, sizeof(html) - offset, "<p>Plugins Loaded:</p><ul>");
+    size_t nr_of_routes= http_route_count();
     for (int i = 0; i < g_PluginCount; i++) {
         PluginContext *pc = &g_Plugins[i];
         if (pc->handle) {
             offset += snprintf(html + offset, sizeof(html) - offset, "<li>%d: %s  (used:%d) ",
              pc->id, pc->name, pc->used_count );
-            for (int j = 0; j < pc->http_caps.http_route_count; j++) {
-                const char* route= pc->http_caps.http_routes[j];
-                offset += snprintf(html + offset, sizeof(html) - offset, "[<a href=\"%s%s\">%s</a>] ",
-                ctx->request.server_url_prefix,
-                route, route );
+            for (size_t j = 0; j < nr_of_routes; j++) {
+                PluginContext *pc2; PluginHttpRequestHandler rh2;
+                http_route_get(j, &rh2, &pc2);
+                if (pc2)
+                if (pc2->id == pc->id){
+                    const char* route= NULL;
+                    http_route_get_path(j, &route);
+                    offset += snprintf(html + offset, sizeof(html) - offset, "[<a href=\"%s%s\">%s</a>] ",
+                        ctx->request.server_url_prefix,
+                        route, route );
+                }
             }
             offset += snprintf(html + offset, sizeof(html) - offset, "</li>");
         }
@@ -74,11 +104,17 @@ void handle_status_html(ClientContext *ctx, RequestParams *params) {
         PluginContext *pc = &g_Plugins[i];
         if (!pc->handle) {
             offset += snprintf(html + offset, sizeof(html) - offset, "<li>%d: %s ", pc->id, pc->name );
-            for (int j = 0; j < pc->http_caps.http_route_count ; j++) {
-                const char* route= pc->http_caps.http_routes[j];
-                offset += snprintf(html + offset, sizeof(html) - offset, "[<a href=\"%s%s\">%s</a>] ",
-                ctx->request.server_url_prefix,
-                route, route );
+            for (size_t j = 0; j < nr_of_routes; j++) {
+                PluginContext *pc2; PluginHttpRequestHandler rh2;
+                http_route_get(j, &rh2, &pc2);
+                if (pc2)
+                if (pc2->id == pc->id){
+                    const char* route= NULL;
+                    http_route_get_path(j, &route);
+                    offset += snprintf(html + offset, sizeof(html) - offset, "[<a href=\"%s%s\">%s</a>] ",
+                        ctx->request.server_url_prefix,
+                        route, route );
+                }
             }
             offset += snprintf(html + offset, sizeof(html) - offset, "</li>");
         }
@@ -92,14 +128,16 @@ void handle_status_html(ClientContext *ctx, RequestParams *params) {
     logmsg("%s status_html request", ctx->client_ip);
 }
 
-void handle_status_json(ClientContext *ctx, RequestParams *params) {
+void handle_status_json(PluginContext*pc, ClientContext *ctx, RequestParams *params) {
+    (void)pc;
     (void)params; // suppress unused parameter warning
     const char *json = "{\"status\":\"running\"}";
     send_response(ctx->socket_fd, 200, "application/json", json);
     //logmsg("%s status_json request", ctx->client_ip);
 }
 
-void infopage(ClientContext *ctx, RequestParams *params) {
+void infopage(PluginContext*pc, ClientContext *ctx, RequestParams *params) {
+    (void)pc;
     (void)params; // suppress unused parameter warning
     dprintf(ctx->socket_fd,
         "HTTP/1.1 200 OK\r\n"
@@ -115,7 +153,8 @@ void infopage(ClientContext *ctx, RequestParams *params) {
         "</body></html>"
     );
 }
-void test_image(ClientContext *ctx, RequestParams *params) {
+void test_image(PluginContext*pc, ClientContext *ctx, RequestParams *params) {
+    (void)pc;
     char filename[MAX_PATH];
     snprintf(filename, sizeof(filename), "%s/test_lat%.2f_lon%.2f_%dx%d.png",
         cache_get_dir(),

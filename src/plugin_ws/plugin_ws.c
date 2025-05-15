@@ -33,45 +33,47 @@
 #include "../data.h"
 #include "../data_geo.h"
 #include "../data_sql.h"
+#include "cmd.h"
 
 #define MAX_APPSESSION (100)
 
-typedef enum CommandId_t
+typedef enum WsTypeId_t
 {
-    CMD_NOP,             // Do nothing, unknown, not implemented, etc.
-    CMD_DISCONNECT,      // Client requests to disconnect (i.e. leave the browser)
-    CMD_PING,            // App layer keep-alive and time sync.
-    CMD_PONG,            // The response for the PING command.
-    CMD_REFRESH,         // Will forget what was the last sent, so send everything again.
-    CMD_HELLO,           // SESSION management, login
-    CMD_CHAT_MESSAGE,    // Chat subsystem received. transmit message.
-    CMD_UPDATE_USER_POS, // User position update (crosshair, working area)
-    CMD_GET_USER_POS,    // Get user position
-    CMD_USERS_POS,       // Get all user positions
-    CMD_RESOURCES,       // Get resources (list)
-    CMD_REGIONS,         // Get regions list
-    CMD_TRADE_ORDERS,    // Get trade orders
-    CMD_DELETE_ORDER,    // Delete order
-    CMD_ADD_ORDER,       // Add order
-    CMD_MAX_ID           // number of the predefined commands.
-} CommandId_t;
+    WST_NOP,             // Do nothing, unknown, not implemented, etc.
+    WST_DISCONNECT,      // Client requests to disconnect (i.e. leave the browser)
+    WST_PING,            // App layer keep-alive and time sync.
+    WST_PONG,            // The response for the PING command.
+    WST_REFRESH,         // Will forget what was the last sent, so send everything again.
+    WST_HELLO,           // SESSION management, login
+    WST_CHAT_MESSAGE,    // Chat subsystem received. transmit message.
+    WST_UPDATE_USER_POS, // User position update (crosshair, working area)
+    WST_GET_USER_POS,    // Get user position
+    WST_USERS_POS,       // Get all user positions
+    WST_RESOURCES,       // Get resources (list)
+    WST_REGIONS,         // Get regions list
+    WST_TRADE_ORDERS,    // Get trade orders
+    WST_DELETE_ORDER,    // Delete order
+    WST_ADD_ORDER,       // Add order
+    WST_MAX_ID           // number of the predefined commands.
+} WsTypeId_t;
 
-const char *g_command_names[CMD_MAX_ID] = {
-    [CMD_NOP] = "nop",
-    [CMD_DISCONNECT] = "disconnect",
-    [CMD_PING] = "ping",
-    [CMD_PONG] = "pong",
-    [CMD_REFRESH] = "refresh",
-    [CMD_HELLO] = "hello",
-    [CMD_CHAT_MESSAGE] = "chat_message",
-    [CMD_UPDATE_USER_POS] = "update_user_pos",
-    [CMD_GET_USER_POS] = "get_user_pos",
-    [CMD_USERS_POS] = "users_pos",
-    [CMD_RESOURCES] = "resources",
-    [CMD_REGIONS] = "regions",
-    [CMD_TRADE_ORDERS] = "trade_orders",
-    [CMD_DELETE_ORDER] = "delete_order",
-    [CMD_ADD_ORDER] = "add_order"};
+const char *g_wstype_names[WST_MAX_ID] = {
+    [WST_NOP] = "nop",
+    [WST_DISCONNECT] = "disconnect",
+    [WST_PING] = "ping",
+    [WST_PONG] = "pong",
+    [WST_REFRESH] = "refresh",
+    [WST_HELLO] = "hello",
+    [WST_CHAT_MESSAGE] = "chat_message",
+    [WST_UPDATE_USER_POS] = "update_user_pos",
+    [WST_GET_USER_POS] = "get_user_pos",
+    [WST_USERS_POS] = "users_pos",
+    [WST_RESOURCES] = "resources",
+    [WST_REGIONS] = "regions",
+    [WST_TRADE_ORDERS] = "trade_orders",
+    [WST_DELETE_ORDER] = "delete_order",
+    [WST_ADD_ORDER] = "add_order"
+};
 
 typedef struct
 {
@@ -105,8 +107,20 @@ int g_sleep_is_needed = 0;
 
 const char *g_http_routes[1] = {"/ws"};
 int g_http_routess_count = 1;
-const char *g_control_routes[1] = {"ws"}; // like WS HELP enter.
-int g_control_routess_count = 1;
+
+typedef enum{
+    CMD_WS_STAT,
+    CMD_WS_SOMETHING,
+    CMD_WS_MAX_ID
+} WsControlCmdId;
+
+static const CommandEntry g_plugin_ws_control_cmds[] = {
+ {.path="ws stat", .help="WebSocket statistics", .arg_hint=""},
+ {.path="ws something", . help="No op", .arg_hint=""}
+};
+
+static const int g_plugin_ws_control_count = 2;
+
 const char *g_ws_routes[1] = {"id_dont_know_yet"};
 int g_ws_routess_count = 1;
 
@@ -437,17 +451,17 @@ void broadcast_chat_message(user_data_t *sender, const char *msg) {
     json_object_put(chat_packet);
 }
 
-CommandResult_t ws_json_command(AppContext_t *actx, CommandId_t cmd, struct json_object *parsed)
+CommandResult_t ws_json_command(AppContext_t *actx, WsTypeId_t wst, struct json_object *parsed)
 {
     if (!actx) return CR_ERROR;
     ClientContext *ctx = actx->ctx;
     CommandResult_t result = CR_UNKNOWN;
-    switch (cmd)
+    switch (wst)
     {
-    case CMD_REFRESH:
+    case WST_REFRESH:
         // will set the known last version to 0, so all update will be sent.
         break;
-    case CMD_CHAT_MESSAGE:{
+    case WST_CHAT_MESSAGE:{
             struct json_object *msg_obj;
             if (!json_object_object_get_ex(parsed, "message", &msg_obj)) {
                 wsapp_send_json_error(actx, "Missing chat message text");
@@ -465,10 +479,10 @@ CommandResult_t ws_json_command(AppContext_t *actx, CommandId_t cmd, struct json
             return CR_PROCESSED;
         }
         break;
-    case CMD_UPDATE_USER_POS:
+    case WST_UPDATE_USER_POS:
         // todo:session and user management needed.
         break;
-    case CMD_HELLO:
+    case WST_HELLO:
     {
         data_handle_t *dh = data_get_handle_by_name("geo");
         if (dh == NULL)
@@ -560,23 +574,23 @@ CommandResult_t ws_json_command(AppContext_t *actx, CommandId_t cmd, struct json
         }
     }
     break;
-    case CMD_DISCONNECT:
+    case WST_DISCONNECT:
         g_host->debugmsg("Client requested quit");
         result = CR_QUIT;
         break;
-    case CMD_PING:
+    case WST_PING:
     {
         g_host->debugmsg("Application-level ping received, sending pong");
         ws_send_json_pong(actx);
         result = CR_PROCESSED;
     }
     break;
-    case CMD_PONG:
+    case WST_PONG:
         g_host->debugmsg("Application-level pong received");
         result = CR_PROCESSED;
         break;
 
-    case CMD_NOP:
+    case WST_NOP:
     default:
         break;
     }
@@ -609,13 +623,16 @@ CommandResult_t plugin_ws_OnTextFrame(struct ws_session_t *s, const char *txt, s
     {
         const char *type = json_object_get_string(type_obj);
         g_host->debugmsg("Received message type: %s", type);
-        for (int i = 0; i < CMD_MAX_ID; i++)
+
+        // todo: replace this with hashmap implementation.
+        for (int i = 0; i < WST_MAX_ID; i++)
         {
-            CommandId_t cmd = (CommandId_t)i;
-            const char *name = g_command_names[i];
+            WsTypeId_t wst = (WsTypeId_t)i;
+            const char *name = g_wstype_names[i];
             if (strcasecmp(type, name) == 0)
             {
-                res = ws_json_command(actx, cmd, parsed);
+
+                res = ws_json_command(actx, wst, parsed);
                 if (res != CR_UNKNOWN)
                 {
                     break;
@@ -700,7 +717,8 @@ int plugin_register(PluginContext *pc, const PluginHostInterface *host)
 {
     (void)pc;
     g_host = host;
-    g_host->server.register_control_route(pc, g_control_routess_count, g_control_routes);
+    // g_host->server.register_control_route(pc, g_control_routess_count, g_control_routes); //old
+    g_host->server.register_commands(pc, g_plugin_ws_control_cmds, g_plugin_ws_control_count);
     g_host->server.register_http_route(pc, g_http_routess_count, g_http_routes);
     return PLUGIN_SUCCESS;
 }
@@ -718,11 +736,26 @@ int plugin_thread_finish(PluginContext *ctx)
     // this will be run for each connection, when finished.
     return 0;
 }
+static int plugin_ws_execute_command(PluginContext *pc, ClientContext *ctx, CommandEntry *pe, char* cmd){
+    (void)pc;
+    (void)ctx;
+    (void)cmd;
+    int ret=-1;
+    if (pe){
+        switch (pe->handlerid){
+            case CMD_WS_SOMETHING: ret = 0; break;
+            case CMD_WS_STAT: ret=0; break;
+        }
+    }
+    return ret;
+}
 int plugin_init(PluginContext *pc, const PluginHostInterface *host)
 {
     (void)pc;
     g_host = host;
     pc->control.request_handler = ws_control_handler;
+    pc->control.execute_command = plugin_ws_execute_command;
+
     pc->http.request_handler = ws_http_handler;
     pc->ws.request_handler = ws_ws_handler;
     g_sleep_is_needed = 0;

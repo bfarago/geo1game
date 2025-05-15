@@ -11,7 +11,7 @@ BIN_DIR="../bin"
 PLUGIN_DIR="../plugins"
 echo "">$LOG
 # Build geod executable
-GEOD_SOURCES="data.c data_sql.c data_geo.c"
+GEOD_SOURCES="data.c data_table.c data_sql.c data_geo.c hashmap.c cmd.c"
 GEOD_SOURCES="$GEOD_SOURCES config.c http.c cache.c handlers.c sync.c json_indexlist.c pluginhst.c"
 GEOD_SOURCES="$GEOD_SOURCES geod.c "
 $CC $CFLAGS -o geod $GEOD_SOURCES -lpng -ldl -lpthread -lm -lssl -lcrypto -ljson-c 2>>$LOG

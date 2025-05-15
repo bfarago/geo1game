@@ -28,6 +28,9 @@
 #include <math.h>
 #include <assert.h>
 
+#define DATA_TABLE_LINKED // use the internal private interface
+#define HTTP_STATIC_LINKED
+#define CMD_STATIC_LINKED
 #include "global.h"
 #include "sync.h"
 #include "plugin.h"
@@ -35,6 +38,7 @@
 #include "config.h"
 #include "cache.h"
 #include "pluginhst.h"
+#include "cmd.h"
 
 #define HOUSEKEEPER_LOCK_TIMEOUT_MS (20u) //  20ms
 #define PLUGIN_SHUTDOWN_TIMEOUT_MS (100u) // 100ms
@@ -569,13 +573,15 @@ int housekeeper_is_running(void){
 int housekeeper_is_mapgen_loaded(void){
     return g_housekeeper.mapgen_loaded;
 }
+
+extern volatile sig_atomic_t release_plugins;
 void housekeeper_plugins(time_t now ){
     for (int i = 0; i < g_PluginCount; i++) {
         PluginContext *pc = &g_Plugins[i];
         if (pc->handle) {
             if (pc->used_count <= 0) {
                 time_t last = (time_t)pc->last_used;
-                if (difftime(now, last) > PLUGIN_IDLE_TIMEOUT) {
+                if (release_plugins || (difftime(now, last) > PLUGIN_IDLE_TIMEOUT)) {
                     int res= plugin_unload(i);
                     if (0 == res){
                         debugmsg("Plugin unloaded: %s", pc->name);
@@ -589,6 +595,7 @@ void housekeeper_plugins(time_t now ){
             }
         }
     }
+    release_plugins = 0;
     if (reload_plugins) {
         logmsg("Received SIGUSR1 — rescanning plugins...");
         plugin_scan_and_register();
@@ -643,13 +650,18 @@ void stop_housekeeper() {
     pthread_join(g_housekeeper.thread_id, NULL);
 }
 
-int server_dump_stat(char *buf, int len);
+// necessary forward defs, implementations are somewhere in host side.
+void server_stat_table(const TableDescr** tdout, TableResults ** trout);
 void server_stat_clear(void);
+int server_execute_commands(ClientContext *ctx, CommandEntry *pe, char* cmd);
+
 /**
  * Plugins can access to the host through this fn pointer collection
  */
 const PluginHostInterface g_plugin_host = {
     .get_plugin_context = get_plugin_context,
+    .start = plugin_start,
+    .stop = plugin_stop,
     .start_timer = (void*)plugin_start_timer,
     .stop_timer = (void*)plugin_stop_timer,
     .logmsg = logmsg,
@@ -667,21 +679,34 @@ const PluginHostInterface g_plugin_host = {
         .enter_own = plugin_ownthread_enter,
         .exit_own = plugin_ownthread_exit,
     },
+    .data = {
+        .results_alloc = table_results_alloc,
+        .results_free = table_results_free,
+        .row_get = table_row_get,
+        .field_set_str = table_field_set_str,
+        .gen_text = table_gen_text
+    },
     .server = {
         .register_http_route = register_http_routes,
-        .register_control_route = register_control_routes,
+        .register_commands = cmd_register_commands,
+        .execute_commands = server_execute_commands,
+        .cmd_search = cmd_search,
+        .cmd_get = cmd_get,
+        .cmd_get_count = cmd_get_count,
+        //.register_control_route = register_control_routes,
         .get_plugin_count = get_plugin_count,
         .get_plugin = get_plugincontext_by_id,
-        .server_dump_stat = server_dump_stat,
+        .server_stat_table = server_stat_table,
         .server_det_str_dump = pluginhst_det_str_dump,
         .server_stat_clear = server_stat_clear
     },
     .http = {
         .send_response = send_response,
         .send_file = send_file,
+        /*
         .send_chunk_head = send_chunk_head,
         .send_chunk_end = send_chunk_end,
-        .send_chunks = send_chunks
+        .send_chunks = send_chunks*/
     },
     .ws = {
         .handshake = ws_hostside_handshake,

@@ -20,7 +20,13 @@
 			"data.h": "c",
 			"data_geo.h": "c",
 			"ws.h": "c",
-			"sync.h": "c"
+			"sync.h": "c",
+			"typeinfo": "c",
+			"data_table.h": "c",
+			"hashmap.h": "c",
+			"cmd.h": "c",
+			"pluginhst.h": "c",
+			"stdlib.h": "c"
 		},
 		"github.copilot.inlineSuggest.enable": false,
 		"C_Cpp.errorSquiggles": "Disabled",

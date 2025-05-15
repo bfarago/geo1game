@@ -125,6 +125,7 @@ typedef struct {
     RequestHandler handler;
 } ControlRouteRule;
 
+#ifdef HTTP_STATIC_LINKED
 // This part probably will be moved to a separated file later. historical reason...
 extern void send_response(int client, int status_code, const char *content_type, const char *body);
 void send_file(int client, const char *content_type, const char *path);
@@ -135,5 +136,16 @@ void send_chunk_end(ClientContext *ctx);
 // Internal, also not relevant here actually...
 void http_parse_request(ClientContext *ctx, HttpRequest *req);
 void parse_request_path_and_params(const char *request, RequestParams *params);
+
+void http_init();
+void http_destroy();
+size_t http_route_count();
+int http_route_get_path(size_t index, const char **path);
+
+#else
+// #define send_chunk_head g_host->http.send_chunk_head
+// #define send_chunks g_host->http.send_chunks
+// #define send_chunk_end g_host->http.send_chunk_end
+#endif
 
 #endif // HTTP_H

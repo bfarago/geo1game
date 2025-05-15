@@ -15,6 +15,8 @@
 #include <unistd.h>
 #include <errno.h>
 
+#define PLUGINHST_STATIC_LINKED
+
 #include "data.h"
 #include "data_sql.h"
 #include "plugin.h"
@@ -65,10 +67,11 @@ void data_sql_queue_callback(PluginContext* dbplugin, DbQuery *req, void *user_d
     (void)dbplugin;
     (void)req;
     sql_internal_db_request_t *res = (sql_internal_db_request_t *)user_data;
-    sync_mutex_lock(res->lock, DATA_SQL_LOCK_TIMEOUT);
-    res->ready = 1;
-    sync_cond_signal(res->cond);
-    sync_mutex_unlock(res->lock);
+    if (!sync_mutex_lock(res->lock, DATA_SQL_LOCK_TIMEOUT)){
+        res->ready = 1;
+        sync_cond_signal(res->cond);
+        sync_mutex_unlock(res->lock);
+    }
 }
 
 sql_internal_db_request_t* data_sql_prepare_instance(sql_data_t *inst, DbQuery *db_query){

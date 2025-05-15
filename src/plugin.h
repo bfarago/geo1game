@@ -16,9 +16,12 @@ extern "C" {
 
 #include "global.h"
 #include "sync.h"
+#include "data_table.h"
 #include "http.h"
 #include "image.h"
 #include "cache.h"
+#include "cmd.h"
+
 
 #define PLUGIN_SUCCESS 0
 #define PLUGIN_SUCCESS_OWN_THEAD 1
@@ -94,23 +97,43 @@ typedef struct MapHostInterface{
  * In example, the http request path which can be handled by the plugin */
 typedef struct{
     void (*register_http_route)(struct PluginContext* pc, int cout, const char *route[]);
-    void (*register_control_route)(struct PluginContext* pc, int cout, const char *route[]);
+    server_execute_commands_fn execute_commands;
+
+    cmd_register_commands_fn register_commands;
+    cmd_search_fn cmd_search;
+    cmd_get_fn cmd_get;
+    cmd_get_cound_fn cmd_get_count;
+    
+    //void (*register_control_route)(struct PluginContext* pc, int cout, const char *route[]);
     int  (*get_plugin_count)(void);
     struct PluginContext* (*get_plugin)(int id);
-    int (*server_dump_stat)(char *buf, int len);
     int (*server_det_str_dump)(char *buf, int len);
+    void (*server_stat_table)(const TableDescr **tdout, TableResults **trout);
     void (*server_stat_clear)(void);
 }ServerHostInterface;
 
+/**
+ * Data handling
+ */
+typedef struct{
+    table_results_alloc_fn results_alloc;  //<-- ez miért nem jó?
+    table_results_free_fn results_free;
+    table_row_get_fn row_get;
+    table_field_set_str_fn field_set_str;
+    table_gen_text_fn gen_text;
+}DataHandlingInterface;
+struct ClientContext;
 /** HTTP protocol specific host interface
  * Plugins / main (users) can call it, to use a http protocol feature, like 
  * send a resopose back to the clients socket. */
 typedef struct {
     void (*send_response)(int clientid, int status_code, const char *content_type, const char *body);
     void (*send_file)(int clientid, const char * content_type, const char *path);
-    void (*send_chunk_head)(ClientContext *ctx, int status_code, const char *content_type);
-    void (*send_chunks)(ClientContext *ctx, char* buf, int offset);
-    void (*send_chunk_end)(ClientContext *ctx);
+    /*
+    void (*send_chunk_head)(struct ClientContext *ctx, int status_code, const char *content_type);
+    void (*send_chunks)(struct ClientContext *ctx, char* buf, int offset);
+    void (*send_chunk_end)(struct ClientContext *ctx);
+    */
 } HttpHostInterface;
 
 /** WebSocket interface related API fns */
@@ -145,6 +168,8 @@ typedef struct {
  */
 typedef struct {
     struct PluginContext* (*get_plugin_context)(const char *name);
+    int (*start)(int id);
+    void (*stop)(int id);
     void (*start_timer)(PCHANDLER pc, int interval, void (*callback)(PCHANDLER));
     void (*stop_timer)(PCHANDLER pc);
     void (*logmsg)(const char *fmt, ...);
@@ -156,6 +181,7 @@ typedef struct {
     int (*config_get_int)(const char *grou, const char *key, int default_value);
     void (*register_db_queue)(PCHANDLER pc, const char *name);
     ThreadHostInterface thread;
+    DataHandlingInterface data;
     ServerHostInterface server;
     HttpHostInterface http;
     WsHostInterface ws;
@@ -186,7 +212,8 @@ typedef struct {
 // Control
 typedef void (*PluginControlRequestHandler)(PCHANDLER, ClientContext *ctx, char* cmd, int argc, char **argv);
 typedef struct{
-    PluginControlRequestHandler request_handler;
+    PluginControlRequestHandler request_handler; // the communication layer
+    plugin_execute_commands_fn execute_command;
 } PluginControlFunctions;
 
 /** DB subsystem
@@ -206,9 +233,11 @@ typedef struct DbQuery{
     char rows[DB_QUERY_MAX_ROWS][DB_QUERY_MAX_ROW_LEN];
     int result_count;
 } DbQuery;
+
 typedef void (*QueryResultProc)(PCHANDLER,  DbQuery* query, void *user_data);
 typedef void (*PluginDbRequestHandler)(DbQuery *query, QueryResultProc result_proc, void *user_data);
 typedef void (*PluginDbQueuePush)();
+
 typedef struct {
     PluginDbRequestHandler request;
 } PluginDbFunctions;
@@ -334,10 +363,11 @@ typedef struct PluginContext{
     plugin_event_handler_t plugin_event;
 } PluginContext;
 
-
+#ifdef PLUGINHST_STATIC_LINKED
 PluginContext* get_plugin_context(const char *name);
 int plugin_start(int id);
 void plugin_stop(int id);
+#endif
 
 #ifdef __cplusplus
 }

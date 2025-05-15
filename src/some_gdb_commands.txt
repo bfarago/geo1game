@@ -1,0 +1,64 @@
+break malloc
+commands
+silent
+printf "malloc(%lu) = %p\n", (unsigned long)$rdi, $rax
+continue
+end
+
+skip file /usr/lib/*
+skip -gfi /usr/include/*
+
+
+break malloc
+commands
+silent
+printf "malloc(%lu) = ", $rdi
+finish
+printf "%p\n", $rax
+end
+
+break free
+commands
+silent
+printf "free(%p)\n", $rdi
+continue
+end
+
+break table_results_alloc
+commands
+silent
+bt
+continue
+end
+break calloc
+break realloc
+
+
+b plugin_control.c:414
+b plugin_control.c:525
+
+
+set $malloc_count = 0
+set $free_count = 0
+
+break malloc
+commands
+silent
+set $malloc_count = $malloc_count + 1
+printf "malloc(%lu) = ", $rdi
+finish
+printf "%p\n", $rax
+if ($malloc_count - $free_count > 10)
+  printf "⚠️ malloc-free imbalance detected: %d > %d\n", $malloc_count, $free_count
+  stop
+end
+continue
+end
+
+break free
+commands
+silent
+set $free_count = $free_count + 1
+printf "free(%p)\n", $rdi
+continue
+end

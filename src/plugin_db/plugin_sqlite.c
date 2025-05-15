@@ -23,7 +23,7 @@ typedef struct {
 } sqlite_result_data_t;
 
 static void (*http_routes[])(PluginContext *, ClientContext *, RequestParams *) = {
-    handle_sqlite_status, handle_sqlite_query, handle_sqlite_query_chunked
+    handle_sqlite_status, handle_sqlite_query //, handle_sqlite_query_chunked
 };
 const char* plugin_http_get_routes[]={"/sqlite", "/sqlite/query"};
 int plugin_http_get_routes_count = 2;
@@ -98,6 +98,7 @@ void handle_sqlite_status(PluginContext *pc, ClientContext *ctx, RequestParams *
     g_host->http.send_response(ctx->socket_fd, 200, "application/json", body);
     g_host->logmsg("%s sqlite status request", ctx->client_ip);
 }
+/*
 void handle_sqlite_query_chunked(PluginContext *pc, ClientContext *ctx, RequestParams *params) {
     (void)pc; // Unused parameter
     (void)params; // Unused parameter
@@ -164,6 +165,7 @@ void handle_sqlite_query_chunked(PluginContext *pc, ClientContext *ctx, RequestP
         free(body);
     }
 }
+*/
 unsigned long sdbm_hash(const char *str) {
     unsigned long hash = 0;
     int c;
