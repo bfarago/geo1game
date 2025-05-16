@@ -55,7 +55,8 @@ struct DbQuery;
 
  /** MAP TerraInfo struct
  * the basic datatype of an atomic point of the map. */
-typedef struct TerrainInfo{
+
+ typedef struct TerrainInfo{
     float elevation;
     unsigned char r, g, b;
     unsigned char precip, temp;

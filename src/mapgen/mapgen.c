@@ -764,7 +764,7 @@ void mapgen_generate(void) {
             pdata += count;
         }
     }
-    for(i = 0; i < g_map.mapsize; i++) {
+    for(size_t i = 0; i < g_map.mapsize; i++) {
         MapPoint *point = &g_map.mapdata[i];
         if (point->precip > 0) {
             point->precip = (unsigned char)((point->precip-precip_min) * 255 / precip_max);

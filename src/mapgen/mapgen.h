@@ -59,7 +59,7 @@ typedef struct {
 } __attribute__((packed)) __attribute__((aligned(8))) MapPoint;
 
 // interface to python api, using float
-typedef struct {
+typedef struct TerrainInfo {
     float elevation;
     unsigned char r, g, b;
     unsigned char precip, temp;
@@ -67,7 +67,7 @@ typedef struct {
 
 // Global variable type to hold the map data
 typedef struct {
-    long mapsize;
+    size_t mapsize;
     long lonsize;
     MapPoint *mapdata;
     mapgen_ret datastatus;

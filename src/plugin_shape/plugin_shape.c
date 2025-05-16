@@ -27,7 +27,7 @@ const HttpRouteRule http_routes[] = {
 };
 
 void handle_shipmodel(ClientContext *ctx, RequestParams *params) {
-    char filename[128];
+    char filename[MAX_PATH];
     snprintf(filename, sizeof(filename), "%s/shipmodel_%d.json",g_cache_dir, params->id);
     if (0 == g_host){
         return;
@@ -48,8 +48,8 @@ void handle_shipmodel(ClientContext *ctx, RequestParams *params) {
         smparams->id = params->id;
         synthesize_shipmodel(smparams, get_plan(params->id));
         int vertex_count_limit = 10000;
-        int json_size_limit = 100* vertex_count_limit* 100;
-        char *json= malloc(10 + vertex_count_limit * 100); // Rough estimate for space
+        int json_size_limit = 100 + vertex_count_limit* 100;  // Rough estimate for space
+        char *json= malloc(json_size_limit);
         int offset = 0;
         offset += snprintf(json + offset, json_size_limit - offset, "{");
         offset += snprintf(json + offset, json_size_limit - offset, "  \"components\": [");

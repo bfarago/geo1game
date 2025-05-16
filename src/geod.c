@@ -867,8 +867,8 @@ void *http_handle_client(void *arg) {
 
 void logstartup(){
     char cwd[MAX_PATH];
-    getcwd(cwd, sizeof(cwd));
-    logmsg("GeoD starting in working dir %s", cwd);
+    char* pcwd = getcwd(cwd, sizeof(cwd));
+    logmsg("GeoD starting in working dir %s", pcwd);
 }
 
 const ServerProtocol g_server_protocols[3] = {

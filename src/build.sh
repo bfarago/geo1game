@@ -4,7 +4,7 @@
 MODE="$1"
 LOG="build.log"
 CC=gcc
-CFLAGS="-std=c99 -O0 -march=native -ffast-math -funroll-loops -mfma -mavx2 -Wall -Wextra -g -fPIC"
+CFLAGS="-std=c99 -O3 -march=native -ffast-math -funroll-loops -mfma -mavx2 -Wall -Wextra -g -fPIC"
 SHARED_FLAGS="-shared"
 INCLUDE_FLAGS="-I./"
 BIN_DIR="../bin"
@@ -35,6 +35,8 @@ $CC $CFLAGS $SHARED_FLAGS $INCLUDE_FLAGS -o http_hello.so plugin_http_hello/plug
 $CC $CFLAGS $SHARED_FLAGS $INCLUDE_FLAGS -o image.so plugin_image/plugin_image.c -lpng 2>>$LOG
 # Texture plugin
 $CC $CFLAGS $SHARED_FLAGS $INCLUDE_FLAGS -o texture.so plugin_texture/plugin_texture.c -lm 2>>$LOG
+# map plugin
+$CC $CFLAGS $SHARED_FLAGS $INCLUDE_FLAGS -o map.so plugin_map/plugin_map.c mapgen/mapgen.c mapgen/perlin3d.c -lm 2>>$LOG
 # Localmap plugin
 $CC $CFLAGS $SHARED_FLAGS $INCLUDE_FLAGS -o localmap.so plugin_texture/plugin_localmap.c -lm 2>>$LOG
 # Region plugin

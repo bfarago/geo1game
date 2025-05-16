@@ -318,7 +318,10 @@ void handle_cgi_testphp(PluginContext *pc, ClientContext *ctx, RequestParams *pa
             "cd '%s'; %s %s %s",
             cgi->script_dir, cgi->php_path, cgi->php_params, cgi->script_name);
 
-        chdir(cgi->script_dir);
+        int retcd= chdir(cgi->script_dir);
+        if (!retcd){
+            errormsg("err: chdir");
+        }
 
         // Prepare environment
         size_t ofs = 0;

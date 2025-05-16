@@ -58,12 +58,33 @@ const char* get_status_text(int status_code){
     }
     return status_text;
 }
+
+int http_write(int client, const char *buf, size_t n){
+    size_t total_written = 0;
+    int retry = 0;
+    while (total_written < n) {
+        ssize_t written = write(client, buf + total_written, n - total_written);
+        if (written <= 0) {
+            if (++retry > 3) {
+                errormsg("write failed repeatedly, aborting send_file()");
+                return -1;
+            }
+            continue;
+        }
+        total_written += written;
+        retry = 0; // Reset retry counter on successful write
+    }
+    return 0;
+}
+
 void send_response(int client, int status_code, const char *content_type, const char *body) {
     size_t len=0;
     if  (body) len=strlen(body);
     dprintf(client, "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %lu\r\n\r\n",
         status_code, get_status_text(status_code), content_type, len);
-    if (body) write(client, body, strlen(body));
+    if (body) {
+        (void) http_write(client, body, len);
+    }
 }
 
 void send_file(int client, const char *content_type, const char *path) {
@@ -73,10 +94,15 @@ void send_file(int client, const char *content_type, const char *path) {
         return;
     }
     dprintf(client, "HTTP/1.1 200 OK\r\nContent-Type: %s\r\n\r\n", content_type);
-    char buf[4096];
+    char buf[BUF_SIZE];
+    int error =0;
     size_t n;
-    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) write(client, buf, n);
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+        error |= http_write(client, buf, n);
+        if (error) break;
+    }
     fclose(f);
+    if (error) errormsg("There was an error during send_file, write operation.");
 }
 
 /** send chunked response first block
@@ -89,17 +115,22 @@ void send_chunk_head(ClientContext *ctx, int status_code, const char *content_ty
         "Content-Type: %s\r\n"
         "Transfer-Encoding: chunked\r\n"
         "\r\n", status_code, get_status_text(status_code), content_type);
-    write(ctx->socket_fd, header, len);
+    int error = http_write(ctx->socket_fd, header, len);
+    if (error) errormsg("There was an error during send_chunk_head, write operation.");
 }
+
 void send_chunks(ClientContext *ctx, char* buf, int offset) {
     char header[32];
     int header_len = snprintf(header, sizeof(header), "%x\r\n", offset);
-    write(ctx->socket_fd, header, header_len);
-    write(ctx->socket_fd, buf, offset);
-    write(ctx->socket_fd, "\r\n", 2);
+    int error = http_write(ctx->socket_fd, header, header_len);
+    error |= http_write(ctx->socket_fd, buf, offset);
+    error |= http_write(ctx->socket_fd, "\r\n", 2);
+    if (error) errormsg("There was an error during send_chunks, write operation.");
 }
+
 void send_chunk_end(ClientContext *ctx){
-    write(ctx->socket_fd, "0\r\n\r\n", 5);
+    int error = write(ctx->socket_fd, "0\r\n\r\n", 5);
+    if (error) errormsg("There was an error during send_chunk_end, write operation.");
 }
 void http_debug_hexdump(const char* prefix, char* buf, int len){
     char hex[256];

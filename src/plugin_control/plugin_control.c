@@ -177,12 +177,29 @@ void stat_get_proc_results(const TableDescr *td, TableResults *res){
     unsigned long priority = 0, starttime = 0;
     FILE *fpstat = fopen("/proc/self/stat", "r");
     if (fpstat) {
-        fscanf(fpstat, "%d (%255[^)]) %c", &pid, comm, &state);
-        for (int i = 0; i < 15; i++) fscanf(fpstat, "%*s"); // skip to priority (18th field)
-        fscanf(fpstat, "%lu", &priority); // priority
+        int ret = fscanf(fpstat, "%d (%255[^)]) %c", &pid, comm, &state);
+        if (ret != 3) {
+            g_host->debugmsg("Warning: fscanf failed to read pid, comm, or state in stat_get_proc_results");
+        }
+        for (int i = 0; i < 15; i++) {
+            ret = fscanf(fpstat, "%*s");
+            // No error check needed for %*s
+        }
+        ret = fscanf(fpstat, "%lu", &priority);
+        if (ret != 1) {
+            g_host->debugmsg("Warning: fscanf failed to read priority in stat_get_proc_results");
+        }
         // skip nice, num_threads, itrealvalue
-        for (int i = 0; i < 3; i++) fscanf(fpstat, "%*s");
-        fscanf(fpstat, "%lu", &starttime); // 22nd field: starttime
+        for (int i = 0; i < 3; i++) {
+            ret = fscanf(fpstat, "%*s");
+        }
+        ret = fscanf(fpstat, "%lu", &starttime);
+        if (ret != 1) {
+            g_host->debugmsg("Warning: fscanf failed to read starttime in stat_get_proc_results");
+        }
+        if (ferror(fpstat) || feof(fpstat)) {
+            g_host->debugmsg("Warning: fscanf failed or reached EOF in stat_get_proc_results");
+        }
         fclose(fpstat);
     }
 
@@ -190,9 +207,13 @@ void stat_get_proc_results(const TableDescr *td, TableResults *res){
     double uptime = 0.0;
     FILE *uptime_fp = fopen("/proc/uptime", "r");
     if (uptime_fp) {
-        fscanf(uptime_fp, "%lf", &uptime);
+        int ret = fscanf(uptime_fp, "%lf", &uptime);
+        if (ret != 1){
+            g_host->errormsg("uptime = timebase calculations will be wrong...");
+        }
         fclose(uptime_fp);
     }
+
     long clk_tck = sysconf(_SC_CLK_TCK);
     double proc_start_secs = (double)starttime / (double)clk_tck;
     double runtime = uptime - proc_start_secs;
@@ -275,7 +296,10 @@ void stat_get_thread_results(const TableDescr *td, TableResults *res){
     double uptime = 0.0;
     FILE *uptime_fp = fopen("/proc/uptime", "r");
     if (uptime_fp) {
-        fscanf(uptime_fp, "%lf", &uptime);
+        int ret = fscanf(uptime_fp, "%lf", &uptime);
+        if (ret != 1) {
+            g_host->debugmsg("Warning: fscanf failed to read uptime in stat_get_thread_results");
+        }
         fclose(uptime_fp);
     }
     // Get process starttime from stat
@@ -283,9 +307,17 @@ void stat_get_thread_results(const TableDescr *td, TableResults *res){
     if (fpstat) {
         int dummy;
         char dummy_comm[256], dummy_state;
-        fscanf(fpstat, "%d (%255[^)]) %c", &dummy, dummy_comm, &dummy_state);
-        for (int i = 0; i < 21; i++) fscanf(fpstat, "%*s");
-        fscanf(fpstat, "%lu", &proc_starttime);
+        int ret = fscanf(fpstat, "%d (%255[^)]) %c", &dummy, dummy_comm, &dummy_state);
+        if (ret != 3) {
+            g_host->debugmsg("Warning: fscanf failed to read pid, comm, or state in stat_get_thread_results");
+        }
+        for (int i = 0; i < 21; i++) {
+            ret = fscanf(fpstat, "%*s");
+        }
+        ret = fscanf(fpstat, "%lu", &proc_starttime);
+        if (ret != 1) {
+            g_host->debugmsg("Warning: fscanf failed to read proc_starttime in stat_get_thread_results");
+        }
         fclose(fpstat);
     }
     double proc_start_secs = (double)proc_starttime / (double)clk_tck;
@@ -309,13 +341,31 @@ void stat_get_thread_results(const TableDescr *td, TableResults *res){
         FILE *fp = fopen(stat_path, "r");
         if (fp) {
             int tid;
-            fscanf(fp, "%d (%255[^)]) %c", &tid, comm, &state);
-            for (int i = 0; i < 15; i++) fscanf(fp, "%*s"); // skip to priority
-            fscanf(fp, "%lu", &priority);
-            for (int i = 0; i < 3; i++) fscanf(fp, "%*s");
-            fscanf(fp, "%lu", &starttime);
-            for (int i = 0; i < 6; i++) fscanf(fp, "%*s");
-            fscanf(fp, "%lu", &kstkesp);
+            int ret = fscanf(fp, "%d (%255[^)]) %c", &tid, comm, &state);
+            if (ret != 3) {
+                g_host->debugmsg("Warning: fscanf failed to read tid, comm, or state in stat_get_thread_results");
+            }
+            for (int i = 0; i < 15; i++) {
+                ret = fscanf(fp, "%*s");
+            }
+            ret = fscanf(fp, "%lu", &priority);
+            if (ret != 1) {
+                g_host->debugmsg("Warning: fscanf failed to read priority in stat_get_thread_results");
+            }
+            for (int i = 0; i < 3; i++) {
+                ret = fscanf(fp, "%*s");
+            }
+            ret = fscanf(fp, "%lu", &starttime);
+            if (ret != 1) {
+                g_host->debugmsg("Warning: fscanf failed to read starttime in stat_get_thread_results");
+            }
+            for (int i = 0; i < 6; i++) {
+                ret = fscanf(fp, "%*s");
+            }
+            ret = fscanf(fp, "%lu", &kstkesp);
+            if (ret != 1) {
+                g_host->debugmsg("Warning: fscanf failed to read kstkesp in stat_get_thread_results");
+            }
             fclose(fp);
         }
 

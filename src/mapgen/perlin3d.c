@@ -286,7 +286,7 @@ float perlin_variation(float lat_deg, float lon_deg) {
     return perlin3(x, y, z);
 }
 
-float perlin_variation_n(float lat_deg, float *lon_deg, float *out, int n) {
+void perlin_variation_n(float lat_deg, float *lon_deg, float *out, int n) {
     float x[BLOCK_SIZE];
     float y[BLOCK_SIZE];
     float z[BLOCK_SIZE];

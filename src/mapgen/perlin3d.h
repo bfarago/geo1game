@@ -64,7 +64,7 @@ float perlin_variation(float lat_deg, float lon_deg);
 /** Spherical Perlin noise function for variations
  *  In case of parameter variation is needed
  */
-float perlin_variation_n(float lat_deg, float *lon_deg, float *out, int n);
+void perlin_variation_n(float lat_deg, float *lon_deg, float *out, int n);
 
 /* FBM (Fractal Brownian Motion) functions could be placed here, or a higher layer. */
 
