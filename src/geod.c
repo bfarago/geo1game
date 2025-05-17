@@ -111,7 +111,6 @@ typedef struct ServerSocket{
     ContextServerData *first_ctx_data;
 } ServerSocket;
 
-
 ServerSocket g_server_sockets[MAX_SERVER_SOCKETS];
 size_t g_server_socket_count = 0;
 
@@ -128,8 +127,6 @@ volatile sig_atomic_t keep_running = 1;
 volatile sig_atomic_t reload_plugins = 0;
 volatile sig_atomic_t release_plugins = 0;
 
-MapContext map_context;
-
 int g_port_http;
 int g_port_ws;
 int g_port_control;
@@ -138,7 +135,6 @@ int g_debug_msg_enabled=0;
 char g_geod_pidfile[MAX_PATH] = GEOD_PIDFILE;
 int g_force_start_kill =0;
 char g_geod_logfile[MAX_PATH] = GEOD_LOGFILE;
-
 
 void sigusr1_handler(int signum) {
     (void)signum;
@@ -303,77 +299,29 @@ void debugmsg(const char *fmt, ...) {
     }
 }
 
-int loadSo(){
-    map_context.lib_handle = dlopen("./libmapgen_c.so", RTLD_LAZY);
-    if (!map_context.lib_handle) {
-        const char *error = dlerror();
-        logmsg("dlopen: %s", error?error : "Unknown error");
-        return (1);
-    }
-    map_context.get_info = (get_terrain_info_t)dlsym(map_context.lib_handle, "mapgen_get_terrain_info");
-    if (!map_context.get_info) {
-        const char *error = dlerror();
-        logmsg("dlopen: %s", error?error : "Unknown error");
-        return (1);
-    }
-    map_context.mapgen_finish = (mapgen_finish_t)dlsym(map_context.lib_handle, "mapgen_finish");
-    if (!map_context.mapgen_finish) {
-        const char *error = dlerror();
-        logmsg("dlopen: %s", error?error : "Unknown error");
-        return (1);
-    }
-    map_context.mapgen_init = (mapgen_init_t)dlsym(map_context.lib_handle, "mapgen_init");
-    if (!map_context.mapgen_init) {
-        const char *error = dlerror();
-        logmsg("dlopen: %s", error?error : "Unknown error");
-        return (1);
-    }
-    g_housekeeper.mapgen_loaded = 1U;
-    g_housekeeper.last_mapgen_use = time(NULL);
-    return (0);
-}
-void closeSo(){
-    if (map_context.lib_handle) {
-        dlclose(map_context.lib_handle);
-        map_context.lib_handle = NULL;
-        map_context.get_info = NULL;
-        map_context.mapgen_finish = NULL;
-        map_context.mapgen_init = NULL;
-        g_housekeeper.mapgen_loaded = 0U;
-    }
-}
 int start_map_context(void){
-    if (!g_housekeeper.running) {
-        logmsg("Housekeeper is not running");
-        return 1;
+    PluginContext *pc = get_plugin_context("map");
+    if (pc) {
+        return plugin_start(pc->id);
     }
-    g_housekeeper.last_mapgen_use = time(NULL);
-    if (g_housekeeper.mapgen_loaded) {
-        // logmsg("Mapgen already loaded");
-        return 0;
-    }
-    loadSo();
-    if (!g_housekeeper.mapgen_loaded) {
-        logmsg("Failed to load mapgen");
-        return 1;
-    }
-    return 0;
+    return -1;
 }
+
 int stop_map_context(void){
-    if (!g_housekeeper.running) {
-        logmsg("Housekeeper is not running");
-        return 1;
-    }
-    if (!g_housekeeper.mapgen_loaded) {
-        logmsg("Mapgen not loaded");
+    PluginContext *pc = get_plugin_context("map");
+    if (pc) {
+        //pc->map.stop_map_context();
+        plugin_stop(pc->id);
         return 0;
     }
-    g_housekeeper.last_mapgen_use = time(NULL);
-    return 0;
+    return -1;
 }
 
 int get_map_info(TerrainInfo *info, float lat, float lon) {
-    *info = map_context.get_info(lat,lon);
+    PluginContext *pc = get_plugin_context("map");
+    if (pc) {
+        return pc->map.get_info(info, lat,lon);
+    }
     return 0;
 }
 
@@ -605,11 +553,6 @@ void housekeeper_server_clients(time_t now ){
         stat_data_add(&ss->stat_failed, count_failed);
         stat_data_add(&ss->stat_exectime, ss->execution_time_5s*1000.0);
         if (g_counter5s >= SD_MAX_COUNT_5S){
-            /* logmsg("%s Server %s:%d Clients stats: (alive, ok, failed, exec, cpu) min (%d, %d, %d, %dms, %0.2f%%) max (%d, %d, %d, %dms, %0.2f%%)",
-                ss->protocol->label, ss->server_ip, ss->port,
-                ss->stat_alive.min5sm, ss->stat_finished.min5sm, ss->stat_failed.min5sm, ss->stat_exectime.min5sm, ss->stat_exectime.min5sm/50.0,
-                ss->stat_alive.max5sm, ss->stat_finished.max5sm, ss->stat_failed.max5sm, ss->stat_exectime.max5sm, ss->stat_exectime.max5sm/50.0);
-            */
             ss->execution_time_5s = 0.0;
         }
     }
@@ -622,12 +565,12 @@ void housekeeper_server_clients(time_t now ){
 
 int file_exists(const char *filename) {
     struct stat st;
-    if (stat(filename, &st) != 0) return 0; // nem létezik
+    if (stat(filename, &st) != 0) return 0; // not extists
     return 1;
 }
 int file_exists_recent(const char *filename, int max_age_seconds) {
     struct stat st;
-    if (stat(filename, &st) != 0) return 0; // nem létezik
+    if (stat(filename, &st) != 0) return 0; // not exists
 
     time_t now = time(NULL);
     return (now - st.st_mtime) < max_age_seconds;
@@ -681,86 +624,52 @@ void server_destroy(){
 void *onProcessControl(void *arg) {
     ClientContext *ctx = (ClientContext *)arg;
     PluginContext *pctx = get_plugin_context("control");
+    int error = 1;
     if (pctx)
     if (!plugin_start(pctx->id)){   
         pctx->control.request_handler(pctx, ctx, "", 0, NULL);
+        error = 0;
         plugin_stop(pctx->id);
     }
-/*
-    // pthread_setname_np("control");
-    int keep_processing = 0;
-    while (keep_processing && keep_running) {
-        char line[BUF_SIZE];
-        // read lines from client
-        ssize_t n = read(ctx->socket_fd, line, sizeof(line)-1);
-        if (n > 0) {
-            line[n] = '\0';
-            dprintf(ctx->socket_fd, "You said: %s", line);  // <- visszaküldés
-            char *cmd = strtok(line, " \r\n");
-            if (cmd) {
-                if (strcasecmp(line, "quit") == 0) {
-                    dprintf(ctx->socket_fd, "Goodbye!\n");
-                    keep_processing = 0;
-                }else if (strcasecmp(line, "reload") == 0) {
-                    dprintf(ctx->socket_fd, "Plugins will be reloaded\n");
-                    reload_plugins=1;
-                }else if (strcasecmp(line, "stop") == 0) {
-                    dprintf(ctx->socket_fd, "Server will be stopped\n");
-                    keep_running = 0;
-                }else if (strcasecmp(line, "stat") == 0) {
-                    char *arg = strtok(NULL, " \r\n");
-                    if (arg) {
-                        dprintf(ctx->socket_fd, "%s staistics\n", arg);
-                    }else{
-                        dprintf(ctx->socket_fd, "staistics\n");
-                    }
-                    char dump[BUF_SIZE];
-                    sync_det_str_dump( dump, BUF_SIZE);
-                    dprintf(ctx->socket_fd, "sync: %s\n", dump);
-                    pluginhst_det_str_dump(dump, BUF_SIZE);
-                    dprintf(ctx->socket_fd, "host: %s\n", dump);
-                    for(int i=0; i<g_PluginCount; i++){
-                        PluginContext *p= &g_Plugins[i];
-                        if (p->stat.det_str_dump){
-                            p->stat.det_str_dump(dump, BUF_SIZE);
-                            dprintf(ctx->socket_fd, "plugin %d (%s): %s\n", p->id, p->name, dump);
+    if (error){
+        int keep_processing = 1;
+        while (keep_processing && keep_running) {
+            char line[BUF_SIZE];
+            ssize_t n = read(ctx->socket_fd, line, sizeof(line)-1);
+            if (n > 0) {
+                line[n] = '\0';
+                char *cmd = strtok(line, " \r\n");
+                if (cmd) {
+                    if (strcasecmp(cmd, "quit") == 0) {
+                        dprintf(ctx->socket_fd, "Goodbye!\n");
+                        keep_processing = 0;
+                    } else {
+                        int index= cmd_search(cmd);
+                        CommandEntry *pe = NULL;
+                        if (index >= 0) {
+                            cmd_get(index, &pe);
                         }
-                    }
-                }else if (strcasecmp(line, "debug") == 0) {
-                    g_debug_msg_enabled = (g_debug_msg_enabled)?0:1;
-                    dprintf(ctx->socket_fd, "debug: %s\n", g_debug_msg_enabled?"on":"off");
-                }else{
-                    for (int id = 0; id < g_PluginCount; id++) {
-                        PluginContext *pctx = &g_Plugins[id];
-                        int n = pctx->control_caps.route_count;
-                        if (n){
-                            for (int j = 0; j < n; j++) {
-                                ControlCapabilities *cap = &pctx->control_caps;
-                                char *route = cap->routes[j];
-                                if (strcasecmp(route, cmd) == 0) {
-                                    char *arg = strtok(NULL, " \r\n");
-                                    int argc =1;
-                                    char * argv[3]={arg, NULL,NULL};
-                                    if (!plugin_start(id)){
-                                        pctx->control.request_handler(pctx, ctx, cmd, argc, argv);
-                                    }else{
-                                        logmsg("itt");
-                                    }
-                                    plugin_stop(id);
-                                    
-                                    break;
-                                }else{
-                                    logmsg("ott");
+                        int ret = -1;
+                        if (pe) {
+                            if (pe->pc) {
+                                if (pe->pc->control.execute_command) {
+                                    ret = pe->pc->control.execute_command(pe->pc, ctx, pe, cmd);
                                 }
+                            } else {
+                                ret = server_execute_commands(ctx, pe, cmd);
                             }
+                        }
+                        if (ret == 0) {
+                            dprintf(ctx->socket_fd, "Command executed.\n");
+                        } else {
+                            dprintf(ctx->socket_fd, "Unknown command: %s\n", cmd);
                         }
                     }
                 }
             }
+            sleep(1);
         }
-        sleep(1);
-    }
-*/
+    } // if error
     close_ClientContext(ctx);
     return NULL;
 }
@@ -1105,7 +1014,6 @@ int main(int argc, char** argv)
             close(ss->fd);
         }
     }
-    closeSo();
     stop_housekeeper();
     server_destroy();
     cmd_destroy();

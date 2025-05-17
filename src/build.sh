@@ -16,8 +16,8 @@ GEOD_SOURCES="$GEOD_SOURCES config.c http.c cache.c handlers.c sync.c json_index
 GEOD_SOURCES="$GEOD_SOURCES geod.c "
 $CC $CFLAGS -o geod $GEOD_SOURCES -lpng -ldl -lpthread -lm -lssl -lcrypto -ljson-c 2>>$LOG
 
-# Build mapgen C extension
-$CC -std=c99 -O3 -march=native -ffast-math -funroll-loops -mfma -mavx2 -shared -fPIC -o libmapgen_c.so mapgen/mapgen.c mapgen/perlin3d.c 2>>$LOG
+# Build mapgen C python extension
+# $CC -std=c99 -O3 -march=native -ffast-math -funroll-loops -mfma -mavx2 -shared -fPIC -o libmapgen_c.so mapgen/mapgen.c mapgen/perlin3d.c 2>>$LOG
 
 #
 # PLUGINS

@@ -48,41 +48,15 @@ typedef int (*plugin_event_handler_t)(PCHANDLER, PluginEventType event, const Pl
 struct DbQuery;
 
 /** MAP subsystem
- * it is a specific (not yet a plugin but .so) module, with a huge memory
- * footprint, therefore the queries are managed, to help unloading, or
- * re loading the module code and data segments.
  */
 
  /** MAP TerraInfo struct
  * the basic datatype of an atomic point of the map. */
-
  typedef struct TerrainInfo{
     float elevation;
     unsigned char r, g, b;
     unsigned char precip, temp;
 } TerrainInfo;
-
-// function prototype for the TerraInfo getter API function
-typedef TerrainInfo (*get_terrain_info_t)(float, float);
-// function prototype for the mapgen init
-typedef int (*mapgen_init_t)(void);
-//function prototype for the mapgen finish
-typedef void (*mapgen_finish_t)(void);
-typedef struct{
-    int (*det_str_dump)(char* buf, int len);
-    int (*det_access)(int *size, int *counters, int *lines );
-    int (*stat_str_dump)(char* buf, int len);
-    void (*stat_clear)(void);
-}StatInterface;
-
-/** MapContext
- * the map subsystem related api from host to the module */
-typedef struct{
-    void *lib_handle;
-    get_terrain_info_t get_info;
-    mapgen_finish_t mapgen_finish;
-    mapgen_init_t mapgen_init;
-} MapContext;
 
 /** MAP subsystem user API
  * in case of a plugin or main code needs a map data, this API is used. */
@@ -91,6 +65,20 @@ typedef struct MapHostInterface{
     int (*stop_map_context)(void);
     int (*get_map_info)(TerrainInfo *info, float lat, float lon);
 } MapHostInterface;
+
+typedef struct MapPluginInterface{
+    int (*get_info)(TerrainInfo *info, float lat, float lon);
+} MapPluginInterface;
+
+/**
+ * statistics subsystem
+ */
+typedef struct{
+    int (*det_str_dump)(char* buf, int len);
+    int (*det_access)(int *size, int *counters, int *lines );
+    int (*stat_str_dump)(char* buf, int len);
+    void (*stat_clear)(void);
+}StatInterface;
 
 /** Server or daemon side API for plugins to call
  * The following function are provided to plugins by the host (daemon)
@@ -104,8 +92,7 @@ typedef struct{
     cmd_search_fn cmd_search;
     cmd_get_fn cmd_get;
     cmd_get_cound_fn cmd_get_count;
-    
-    //void (*register_control_route)(struct PluginContext* pc, int cout, const char *route[]);
+
     int  (*get_plugin_count)(void);
     struct PluginContext* (*get_plugin)(int id);
     int (*server_det_str_dump)(char *buf, int len);
@@ -117,12 +104,13 @@ typedef struct{
  * Data handling
  */
 typedef struct{
-    table_results_alloc_fn results_alloc;  //<-- ez miért nem jó?
+    table_results_alloc_fn results_alloc;
     table_results_free_fn results_free;
     table_row_get_fn row_get;
     table_field_set_str_fn field_set_str;
     table_gen_text_fn gen_text;
 }DataHandlingInterface;
+
 struct ClientContext;
 /** HTTP protocol specific host interface
  * Plugins / main (users) can call it, to use a http protocol feature, like 
@@ -360,6 +348,8 @@ typedef struct PluginContext{
     PluginDbFunctions db;
     // Image functions
     PluginImageFunctions image;
+    // Map functions
+    MapPluginInterface map;
     // Generic event handler (optional)
     plugin_event_handler_t plugin_event;
 } PluginContext;

@@ -44,8 +44,6 @@
 #define PLUGIN_SHUTDOWN_TIMEOUT_MS (100u) // 100ms
 #define PLUGIN_SHUTDOWN_MAX_RETRY (5u)    // max 5*100ms
 
-extern MapContext map_context;
-
 typedef struct {
     int interval;
 } plugin_timer_t;
@@ -602,26 +600,13 @@ void housekeeper_plugins(time_t now ){
         reload_plugins = 0;
     }
 }
-void housekeeper_mapgen(time_t now ){
-    if (g_housekeeper.mapgen_loaded) {
-        if (g_housekeeper.last_mapgen_use + MAPGEN_IDLE_TIMEOUT < now) {
-            debugmsg("Mapgen idle timeout. Unloading mapgen");
-            if (map_context.mapgen_finish) {
-                map_context.mapgen_finish();
-                closeSo();
-            }
-        }
-    }
-}
 
 void *housekeeper_thread(void *arg) {
     (void)arg; // suppress unused parameter warning
-    // pthread_setname_np("housekeeper");
     sync_mutex_init(&g_housekeeper.lock);
     while (g_housekeeper.running) {
         time_t now = time(NULL);
         housekeeper_plugins(now);
-        housekeeper_mapgen(now);
         housekeeper_server_clients(now);
         for (int i = 0; i<5; i++) {
             if (g_housekeeper.running) {

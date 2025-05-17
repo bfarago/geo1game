@@ -161,6 +161,13 @@ int plugin_thread_finish(PluginContext *ctx) {
     return 0;
 }
 
+TerrainInfo mapgen_get_terrain_info(float lat, float lon);
+int mapgen_get_terrain_info0(TerrainInfo *info, float lat, float lon) {
+    if (info) {
+        *info = mapgen_get_terrain_info(lat, lon);
+    }
+    return 0;
+}
 int plugin_init(PluginContext* pc, const PluginHostInterface *host) {
     (void)pc;
     g_host = host;
@@ -168,6 +175,8 @@ int plugin_init(PluginContext* pc, const PluginHostInterface *host) {
     pc->control.execute_command = plugin_map_execute_command; // command execution layer
     // http protocol
     pc->http.request_handler= http_handler;
+    // map
+    pc->map.get_info = mapgen_get_terrain_info0;
     return PLUGIN_SUCCESS;
 }
 
@@ -176,6 +185,7 @@ void plugin_finish(PluginContext* pc) {
     // Will runs once, when plugin unloaded.
     pc->http.request_handler = NULL;
     pc->control.execute_command  = NULL;
+    pc->map.get_info = NULL;
 }
 
 // Plugin event handler implementation

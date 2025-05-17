@@ -183,3 +183,4 @@ etc/geod/geod.ini
 src/test.ini
 *.pid
 core
+src/geod

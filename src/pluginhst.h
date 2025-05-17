@@ -31,7 +31,6 @@ void ws_hostside_handshake(PluginContext *pc, WsRequestParams* wsp, const char *
 
 
 //MAP
-void closeSo();
 int start_map_context(void);
 int stop_map_context(void);
 int get_map_info(TerrainInfo *info, float lat, float lon);
