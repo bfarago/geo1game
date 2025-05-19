@@ -1,3 +1,4 @@
+#define PLUGINHST_STATIC_LINKED
 #include "unity.h"
 #include "data.h"
 #include "data_sql.h"
@@ -11,7 +12,6 @@ void errormsg(const char *fmt, ...) {
     // no-op, just for testing
 }
 
-// #define IN_UNITTEST // vagy milyen define van már készen a unity-ben ?
 #include "data_sql.c"
 
 

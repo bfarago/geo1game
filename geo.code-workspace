@@ -26,7 +26,8 @@
 			"hashmap.h": "c",
 			"cmd.h": "c",
 			"pluginhst.h": "c",
-			"stdlib.h": "c"
+			"stdlib.h": "c",
+			"plugin.h": "c"
 		},
 		"github.copilot.inlineSuggest.enable": false,
 		"C_Cpp.errorSquiggles": "Disabled",

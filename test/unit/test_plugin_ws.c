@@ -91,7 +91,7 @@ void test_ws_send_user_data(){
     TEST_ASSERT_NOT_NULL(strstr(g_last_sent_json, "1:'{"));
     TEST_ASSERT_NOT_NULL(strstr(g_last_sent_json, "\"type\": \"pong\""));
 
-    ws_json_command(&app, CMD_PING, NULL);
+    ws_json_command(&app, WST_PING, NULL);
     TEST_ASSERT_NOT_NULL(strstr(g_last_sent_json, "2:'{"));
     TEST_ASSERT_NOT_NULL(strstr(g_last_sent_json, "\"type\": \"pong\""));
 
@@ -124,9 +124,9 @@ user_data_t* stubFindUserBySession(data_handle_t *dh, const char* session_key){
     return g_returnFindUserBySession;
 }
 /**
- * CMD_HELLO  using GEO data api
+ * WST_HELLO  using GEO data api
  */
-void test_ws_cmd_hello(){
+void test_ws_wst_hello(){
     const char *session_id= "ABCDEFG";
     ClientContext ctx;
     snprintf(ctx.request.session_id, sizeof( ctx.request.session_id ), "%s", session_id);

@@ -16,7 +16,6 @@
 #include <errno.h>
 
 #define PLUGINHST_STATIC_LINKED
-
 #include "data.h"
 #include "data_sql.h"
 #include "plugin.h"
@@ -26,7 +25,7 @@
 volatile int g_data_sql_abort = 0;
 
 #ifndef DATA_SQL_LONG_RUN_LOOP
-#define DATA_SQL_LONG_RUN_LOOP()  {static unsigned int count=0; if (count++>0xFFFFFFFFU) break;} // documentation of the possible endless loop.
+#define DATA_SQL_LONG_RUN_LOOP()  {static unsigned int count=0; if (count++ > 0xFFFFFFFFU) break;} // documentation of the possible endless loop.
 #endif // DATA_SQL_LONG_RUN_LOOP
 
 #define DATA_SQL_LOCK_TIMEOUT (1000)
